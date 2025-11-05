@@ -1,4 +1,4 @@
-git+https://github.com/bitvavo/python-bitvavo-api.git
+ccxt
 pandas
 pyyaml
 python-dotenv
