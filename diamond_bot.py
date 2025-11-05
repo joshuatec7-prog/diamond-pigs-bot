@@ -5,7 +5,7 @@ from pathlib import Path
 import pandas as pd
 import yaml
 from dotenv import load_dotenv
-from bitvavo import Bitvavo
+import ccxt
 
 # ---------- Indicatoren ----------
 def sma(series: pd.Series, length: int) -> pd.Series:
@@ -48,53 +48,66 @@ def append_trade(row: dict):
 def pct(a, b):
     return (a - b) / b * 100.0 if b else 0.0
 
-# ---------- Bitvavo ----------
+# ---------- CCXT Bitvavo client ----------
 def bv_client():
     load_dotenv(ROOT / ".env")
     key = os.getenv("BITVAVO_API_KEY", "")
     sec = os.getenv("BITVAVO_API_SECRET", "")
     if not key or not sec:
         raise RuntimeError("BITVAVO_API_KEY en BITVAVO_API_SECRET ontbreken")
-    return Bitvavo({
-        'APIKEY': key,
-        'APISECRET': sec,
-        'RESTURL': 'https://api.bitvavo.com/v2/',
-        'WSURL': 'wss://ws.bitvavo.com/v2/'
+    exchange = ccxt.bitvavo({
+        "apiKey": key,
+        "secret": sec,
+        "enableRateLimit": True,
     })
+    return exchange
 
-def get_free_eur(bv):
-    bal = bv.balance({'symbol': 'EUR'})
-    if isinstance(bal, list) and bal:
-        return float(bal[0].get('available', '0') or 0)
-    return 0.0
+def get_free_eur(exchange):
+    bal = exchange.fetch_balance()
+    eur = bal.get("EUR") or {}
+    return float(eur.get("free", 0.0) or 0.0)
 
-def price_ticker(bv, market):
-    t = bv.tickerPrice({'market': market})
-    return float(t[0]['price'])
+def price_ticker(exchange, market):
+    # market bv. "BTC/EUR"
+    t = exchange.fetch_ticker(market)
+    return float(t["last"])
 
-def orderbook_spread_pct(bv, market):
-    ob = bv.getBook({'market': market, 'depth': 1})
-    bid = float(ob.get('bids', [[0, 0]])[0][0]) if ob.get('bids') else 0.0
-    ask = float(ob.get('asks', [[0, 0]])[0][0]) if ob.get('asks') else 0.0
+def orderbook_spread_pct(exchange, market):
+    ob = exchange.fetch_order_book(market, limit=1)
+    bids = ob.get("bids") or []
+    asks = ob.get("asks") or []
+    bid = float(bids[0][0]) if bids else 0.0
+    ask = float(asks[0][0]) if asks else 0.0
     if bid and ask:
         return (ask - bid) / ((ask + bid) / 2) * 100.0
     return 999.0
 
-def candles_df(bv, market, interval, limit):
-    raw = bv.candles(market, interval, {'limit': limit})
+def candles_df(exchange, market, interval, limit):
+    # ccxt: fetch_ohlcv(symbol, timeframe, limit=...)
+    # ohlcv: [timestamp, open, high, low, close, volume]
+    raw = exchange.fetch_ohlcv(market, timeframe=interval, limit=limit)
+    if not raw:
+        return pd.DataFrame()
     df = pd.DataFrame(raw, columns=["time", "open", "high", "low", "close", "volume"])
-    df["time"] = pd.to_datetime(df["time"], unit="ms", utc=True).dt.tz_convert('UTC')
+    df["time"] = pd.to_datetime(df["time"], unit="ms", utc=True).dt.tz_convert("UTC")
     for c in ["open", "high", "low", "close", "volume"]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     return df.dropna().reset_index(drop=True)
 
-def place_market_buy(bv, market, amount_quote_eur):
-    params = {"amountQuote": f"{amount_quote_eur:.2f}"}
-    return bv.placeOrder(market, "buy", "market", params)
+def place_market_buy(exchange, market, amount_quote_eur):
+    # koop volume = eur / prijs
+    price = price_ticker(exchange, market)
+    amount_base = amount_quote_eur / price
+    order = exchange.create_order(market, "market", "buy", amount_base)
+    cost = float(order.get("cost", amount_quote_eur) or amount_quote_eur)
+    filled = float(order.get("amount", amount_base) or amount_base)
+    avg_price = cost / filled if filled else price
+    return order, filled, cost, avg_price
 
-def place_market_sell_amount(bv, market, amount_base):
-    params = {"amount": f"{amount_base:.8f}"}
-    return bv.placeOrder(market, "sell", "market", params)
+def place_market_sell_amount(exchange, market, amount_base, last_price):
+    order = exchange.create_order(market, "market", "sell", amount_base)
+    proceeds = float(order.get("cost", amount_base * last_price) or (amount_base * last_price))
+    return order, proceeds
 
 # ---------- Signalen ----------
 def compute_signals(df, cfg):
@@ -169,7 +182,7 @@ def main():
         format="%(asctime)s %(levelname)s %(message)s",
     )
 
-    bv = bv_client()
+    exchange = bv_client()
     state = load_state()
 
     quote = cfg["quote"]
@@ -177,22 +190,22 @@ def main():
     sleep_s = cfg["logging"]["loop_sleep_seconds"]
     limit = cfg["logging"]["candles_limit"]
 
-    logging.info("Diamond-Pigs-stijl bot gestart")
+    logging.info("Diamond-Pigs-stijl bot (ccxt) gestart")
 
     while True:
         try:
-            free_eur = get_free_eur(bv)
+            free_eur = get_free_eur(exchange)
             logging.info(f"Vrij {quote}: {free_eur:.2f}")
 
             for base in cfg["symbols"]:
-                market = f"{base}-{quote}"
+                market = f"{base}/{quote}"
                 try:
-                    spread = orderbook_spread_pct(bv, market)
+                    spread = orderbook_spread_pct(exchange, market)
                     if spread > cfg["risk"]["max_spread_pct"]:
                         logging.debug(f"{market} spread {spread:.3f}% > limiet")
                         continue
 
-                    df = candles_df(bv, market, interval, limit)
+                    df = candles_df(exchange, market, interval, limit)
                     df, buy_sig, sell_sig = compute_signals(df, cfg)
                     if df.empty:
                         continue
@@ -208,17 +221,21 @@ def main():
                         should_sell = sell_sig or tp_hit or sl_hit
                         if should_sell:
                             bot_amount = float(pos.get("amount_base", 0.0))
-                            bal = bv.balance({'symbol': base})
-                            avail = 0.0
-                            if isinstance(bal, list) and bal:
-                                avail = float(bal[0].get('available', '0') or 0.0)
+
+                            bal = exchange.fetch_balance()
+                            asset = bal.get(base) or {}
+                            avail = float(asset.get("free", 0.0) or 0.0)
+
                             amount_to_sell = min(bot_amount, avail)
+
                             if amount_to_sell > 0:
-                                place_market_sell_amount(bv, market, amount_to_sell)
-                                proceeds = amount_to_sell * last_price
+                                _, proceeds = place_market_sell_amount(
+                                    exchange, market, amount_to_sell, last_price
+                                )
                                 cost = float(pos.get("cost_eur", 0.0))
                                 realized = proceeds - cost
                                 state["pnl_eur"] = float(state.get("pnl_eur", 0.0)) + realized
+
                                 append_trade({
                                     "ts": now_ts().isoformat(),
                                     "market": market,
@@ -230,6 +247,7 @@ def main():
                                     "realized_pnl_eur": realized,
                                     "reason": "TP" if tp_hit else "SL" if sl_hit else "Signal",
                                 })
+
                                 state["positions"][base] = {"open": False}
                                 mins = cfg["risk"]["cooldown_minutes"]
                                 state["cooldown"][base] = (now_ts() + timedelta(minutes=mins)).isoformat()
@@ -245,17 +263,10 @@ def main():
                         if isinstance(cap, (int, float)):
                             stake = min(stake, cap)
                         if stake >= 5.0:
-                            order = place_market_buy(bv, market, stake)
-                            filled_eur, filled_base = 0.0, 0.0
-                            if isinstance(order, dict):
-                                for f in order.get("fills", []):
-                                    filled_eur += float(f.get("amountQuote", 0) or 0)
-                                    filled_base += float(f.get("amount", 0) or 0)
-                            if filled_eur == 0 or filled_base == 0:
-                                price = price_ticker(bv, market)
-                                filled_eur = stake
-                                filled_base = stake / price
-                            avg_price = filled_eur / filled_base if filled_base else last_price
+                            order, filled_base, filled_eur, avg_price = place_market_buy(
+                                exchange, market, stake
+                            )
+
                             state["positions"][base] = {
                                 "open": True,
                                 "avg_price": avg_price,
@@ -264,6 +275,7 @@ def main():
                                 "peak": avg_price,
                                 "amount_base": filled_base,
                             }
+
                             append_trade({
                                 "ts": now_ts().isoformat(),
                                 "market": market,
@@ -273,12 +285,13 @@ def main():
                                 "cost_eur": filled_eur,
                                 "reason": "Signal",
                             })
+
                             save_state(state)
                             logging.info(f"{market} gekocht voor €{filled_eur:.2f} @ {avg_price:.2f}")
                         else:
                             logging.debug(f"{market} inzet te laag: {stake:.2f}")
                 except Exception as e:
-                    logging.exception(f"Fout bij {market}: {e}")
+                    logging.exception(f"Fout bij market {market}: {e}")
         except Exception as e:
             logging.exception(f"Hoofdlus fout: {e}")
         time.sleep(sleep_s)
