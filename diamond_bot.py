@@ -53,6 +53,32 @@ def append_trade(row: dict) -> None:
 def pct(a: float, b: float) -> float:
     return (a - b) / b * 100.0 if b else 0.0
 
+# ---------- Fees helpers ----------
+
+def fee_in_quote(order: dict, quote: str) -> float:
+    """Som van alle fees in quote-valuta (EUR) uit een ccxt-order."""
+    total = 0.0
+    fees = []
+
+    if "fees" in order and order["fees"]:
+        fees.extend(order["fees"])
+    if "fee" in order and order["fee"]:
+        # sommige exchanges geven een enkel fee-object
+        fees.append(order["fee"])
+
+    for f in fees:
+        cur = f.get("currency")
+        cost = f.get("cost", 0) or 0
+        try:
+            cost = float(cost)
+        except Exception:
+            cost = 0.0
+        # als er geen currency staat, neem aan dat het quote is
+        if cur is None or cur == quote:
+            total += cost
+
+    return total
+
 # ---------- Bitvavo via ccxt ----------
 
 def bv_client() -> ccxt.bitvavo:
@@ -106,20 +132,35 @@ def candles_df(exchange: ccxt.bitvavo, market: str, interval: str, limit: int) -
     return df.dropna().reset_index(drop=True)
 
 def place_market_buy(exchange: ccxt.bitvavo, market: str, amount_quote_eur: float):
+    base, quote = market.split("/")
     price = price_ticker(exchange, market)
     amount_base = amount_quote_eur / price
+
     order = exchange.create_order(market, "market", "buy", amount_base)
+
+    # bruto kostprijs volgens exchange
     cost = float(order.get("cost", amount_quote_eur) or amount_quote_eur)
+    # fees in quote-valuta
+    fee_q = fee_in_quote(order, quote)
+    # totale kostprijs inclusief fee(s)
+    cost_total = cost + fee_q
+
     filled = float(order.get("amount", amount_base) or amount_base)
-    avg_price = cost / filled if filled else price
-    return order, filled, cost, avg_price
+    avg_price = cost_total / filled if filled else price
+
+    return order, filled, cost_total, avg_price
 
 def place_market_sell_amount(
     exchange: ccxt.bitvavo, market: str, amount_base: float, last_price: float
 ):
+    base, quote = market.split("/")
     order = exchange.create_order(market, "market", "sell", amount_base)
-    proceeds = float(order.get("cost", amount_base * last_price) or (amount_base * last_price))
-    return order, proceeds
+
+    gross = float(order.get("cost", amount_base * last_price) or (amount_base * last_price))
+    fee_q = fee_in_quote(order, quote)
+    proceeds_net = gross - fee_q
+
+    return order, proceeds_net
 
 # ---------- Signalen ----------
 
@@ -206,7 +247,7 @@ def main():
     sleep_s = cfg["logging"]["loop_sleep_seconds"]
     limit = cfg["logging"]["candles_limit"]
 
-    logging.info("Diamond-Pigs-stijl bot (ccxt) gestart")
+    logging.info("Diamond-Pigs-stijl bot (ccxt, netto fees) gestart")
 
     while True:
         try:
@@ -247,11 +288,11 @@ def main():
                             amount_to_sell = min(bot_amount, avail)
 
                             if amount_to_sell > 0:
-                                _, proceeds = place_market_sell_amount(
+                                _, proceeds_net = place_market_sell_amount(
                                     exchange, market, amount_to_sell, last_price
                                 )
-                                cost = float(pos.get("cost_eur", 0.0))
-                                realized = proceeds - cost
+                                cost_eur = float(pos.get("cost_eur", 0.0))
+                                realized = proceeds_net - cost_eur  # netto na koop+verkoop-fees
                                 state["pnl_eur"] = float(state.get("pnl_eur", 0.0)) + realized
 
                                 append_trade({
@@ -260,7 +301,7 @@ def main():
                                     "side": "SELL",
                                     "price": last_price,
                                     "amount_base": amount_to_sell,
-                                    "proceeds_eur": proceeds,
+                                    "proceeds_eur": proceeds_net,
                                     "avg_entry": pos["avg_price"],
                                     "realized_pnl_eur": realized,
                                     "reason": "TP" if tp_hit else "SL" if sl_hit else "Signal",
@@ -272,7 +313,7 @@ def main():
                                     now_ts() + timedelta(minutes=mins)
                                 ).isoformat()
                                 save_state(state)
-                                logging.info(f"{market} verkocht. PnL €{realized:.2f}")
+                                logging.info(f"{market} verkocht. Netto PnL €{realized:.2f}")
                             else:
                                 logging.warning(f"{market} geen eigen {base}-positie om te verkopen")
 
@@ -283,17 +324,17 @@ def main():
                         if isinstance(cap, (int, float)):
                             stake = min(stake, cap)
                         if stake >= 5.0:
-                            order, filled_base, filled_eur, avg_price = place_market_buy(
+                            order, filled_base, cost_total_eur, avg_price = place_market_buy(
                                 exchange, market, stake
                             )
 
                             state["positions"][base] = {
                                 "open": True,
                                 "avg_price": avg_price,
-                                "cost_eur": filled_eur,
+                                "cost_eur": cost_total_eur,  # inclusief fees
                                 "opened_at": now_ts().isoformat(),
                                 "peak": avg_price,
-                                "amount_base": filled_base,  # alleen deze hoeveelheid wordt later verkocht
+                                "amount_base": filled_base,
                             }
 
                             append_trade({
@@ -302,12 +343,14 @@ def main():
                                 "side": "BUY",
                                 "price": avg_price,
                                 "amount_base": filled_base,
-                                "cost_eur": filled_eur,
+                                "cost_eur": cost_total_eur,
                                 "reason": "Signal",
                             })
 
                             save_state(state)
-                            logging.info(f"{market} gekocht voor €{filled_eur:.2f} @ {avg_price:.2f}")
+                            logging.info(
+                                f"{market} gekocht voor netto €{cost_total_eur:.2f} @ {avg_price:.2f}"
+                            )
                         else:
                             logging.debug(f"{market} inzet te laag: {stake:.2f}")
 
