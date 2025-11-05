@@ -1,0 +1,32 @@
+quote: EUR
+symbols: [BTC, ETH, ADA, SOL, XRP]
+timeframe: "5m"
+
+signals:
+  use_sma: true
+  sma_fast: 9
+  sma_slow: 21
+  use_rsi: true
+  rsi_len: 14
+  rsi_buy_min: 50
+  rsi_sell_max: 45
+
+risk:
+  fixed_stake_quote: 15
+  stake_fraction: 0.10
+  max_open_positions: 10
+  max_pct_per_coin: 25
+  only_buy_if_not_in_position: true
+  single_open_buy_per_coin: true
+  cooldown_minutes: 15
+  max_spread_pct: 0.20
+
+protection:
+  take_profit_pct: 3.0
+  stop_loss_pct: 2.0
+  trailing_tp_pct: 0.0
+
+logging:
+  level: INFO
+  loop_sleep_seconds: 30
+  candles_limit: 300
