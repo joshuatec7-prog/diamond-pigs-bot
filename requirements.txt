@@ -1,0 +1,4 @@
+bitvavo
+pandas
+pyyaml
+python-dotenv
