@@ -12,8 +12,8 @@ signals:
   rsi_sell_max: 45
 
 risk:
-  fixed_stake_quote: 15
-  stake_fraction: 0.10
+  fixed_stake_quote: 15     # vaste inzet per trade (winst wordt niet herbelegd)
+  stake_fraction: 0.00      # niet gebruikt omdat fixed_stake_quote > 0
   max_open_positions: 10
   max_pct_per_coin: 25
   only_buy_if_not_in_position: true
