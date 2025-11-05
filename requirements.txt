@@ -1,4 +1,0 @@
-git+https://github.com/bitvavo/python-bitvavo-api.git
-pandas
-pyyaml
-python-dotenv
