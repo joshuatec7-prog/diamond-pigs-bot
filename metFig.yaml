@@ -1,0 +1,33 @@
+quote: EUR
+symbols: [BTC, ETH, ADA, SOL, XRP]
+timeframe: "15m"
+
+signals:
+  use_sma: true
+  sma_fast: 10
+  sma_slow: 25
+  use_rsi: true
+  rsi_len: 14
+  rsi_buy_min: 55
+  rsi_sell_max: 45
+
+risk:
+  fixed_stake_quote: 20      # vaste inzet per trade in EUR
+  stake_fraction: 0.00       # niet gebruikt omdat fixed_stake_quote > 0
+  max_open_positions: 6
+  max_pct_per_coin: 25       # max % van bruikbaar EUR per coin
+  only_buy_if_not_in_position: true
+  single_open_buy_per_coin: true
+  cooldown_minutes: 30
+  max_spread_pct: 0.15       # max spread in %
+  eur_reserve: 50.0          # minimaal bedrag dat altijd vrij moet blijven
+
+protection:
+  take_profit_pct: 3.0       # TP op +3 %
+  stop_loss_pct: 2.0         # SL op -2 %
+  trailing_tp_pct: 0.0       # 0 = uit
+
+logging:
+  level: INFO
+  loop_sleep_seconds: 30
+  candles_limit: 300
