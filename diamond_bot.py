@@ -10,10 +10,13 @@ import yaml
 from dotenv import load_dotenv
 import ccxt
 
-# ---------- Indicatoren ----------
+# =========================
+#   Indicator functies
+# =========================
 
 def sma(series: pd.Series, length: int) -> pd.Series:
     return series.rolling(length).mean()
+
 
 def rsi(series: pd.Series, length: int = 14) -> pd.Series:
     delta = series.diff()
@@ -24,39 +27,52 @@ def rsi(series: pd.Series, length: int = 14) -> pd.Series:
     rs = roll_up / (roll_down.replace(0, 1e-12))
     return 100 - (100 / (1 + rs))
 
-# ---------- Paden / helpers ----------
+
+# =========================
+#   Paden / helpers
+# =========================
 
 ROOT = Path(__file__).parent
-STATE_FILE = ROOT / "state.json"
-TRADES_CSV = ROOT / "trades.csv"
+CFG_FILE = ROOT / "metFig.yaml"
+STATE_FILE = ROOT / "staat.json"
+TRADES_CSV = ROOT / "transacties.csv"
+
 
 def now_ts() -> datetime:
     return datetime.now(timezone.utc).astimezone()
 
+
 def load_cfg() -> dict:
-    with open(ROOT / "config.yaml", "r", encoding="utf-8") as f:
+    with open(CFG_FILE, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
+
 
 def load_state() -> dict:
     if STATE_FILE.exists():
         return json.loads(STATE_FILE.read_text())
     return {"positions": {}, "cooldown": {}, "pnl_eur": 0.0}
 
+
 def save_state(state: dict) -> None:
     STATE_FILE.write_text(json.dumps(state, indent=2))
 
+
 def append_trade(row: dict) -> None:
-    hdr = not TRADES_CSV.exists()
+    header = not TRADES_CSV.exists()
     df = pd.DataFrame([row])
-    df.to_csv(TRADES_CSV, index=False, mode="a", header=hdr)
+    df.to_csv(TRADES_CSV, index=False, mode="a", header=header)
+
 
 def pct(a: float, b: float) -> float:
     return (a - b) / b * 100.0 if b else 0.0
 
-# ---------- Fees helpers ----------
+
+# =========================
+#   Fee helpers
+# =========================
 
 def fee_in_quote(order: dict, quote: str) -> float:
-    """Som van alle fees in quote-valuta (EUR) uit een ccxt-order."""
+    """Som van fees in quote-valuta (EUR) uit een ccxt-order."""
     total = 0.0
     fees = []
 
@@ -77,7 +93,10 @@ def fee_in_quote(order: dict, quote: str) -> float:
 
     return total
 
-# ---------- Bitvavo via ccxt ----------
+
+# =========================
+#   Bitvavo via ccxt
+# =========================
 
 def bv_client() -> ccxt.bitvavo:
     load_dotenv(ROOT / ".env")
@@ -86,7 +105,7 @@ def bv_client() -> ccxt.bitvavo:
     operator = os.getenv("BITVAVO_OPERATOR_ID", "")
 
     if not key or not sec:
-        raise RuntimeError("BITVAVO_API_KEY en BITVAVO_API_SECRET ontbreken")
+        raise RuntimeError("BITVAVO_API_KEY en/of BITVAVO_API_SECRET ontbreken in .env")
     if not operator:
         raise RuntimeError("BITVAVO_OPERATOR_ID ontbreekt (vereist door Bitvavo via ccxt)")
 
@@ -100,14 +119,17 @@ def bv_client() -> ccxt.bitvavo:
     })
     return exchange
 
+
 def get_free_eur(exchange: ccxt.bitvavo) -> float:
     bal = exchange.fetch_balance()
     eur = bal.get("EUR") or {}
     return float(eur.get("free", 0.0) or 0.0)
 
+
 def price_ticker(exchange: ccxt.bitvavo, market: str) -> float:
     t = exchange.fetch_ticker(market)
     return float(t["last"])
+
 
 def orderbook_spread_pct(exchange: ccxt.bitvavo, market: str) -> float:
     ob = exchange.fetch_order_book(market, limit=1)
@@ -119,6 +141,7 @@ def orderbook_spread_pct(exchange: ccxt.bitvavo, market: str) -> float:
         return (ask - bid) / ((ask + bid) / 2) * 100.0
     return 999.0
 
+
 def candles_df(exchange: ccxt.bitvavo, market: str, interval: str, limit: int) -> pd.DataFrame:
     raw = exchange.fetch_ohlcv(market, timeframe=interval, limit=limit)
     if not raw:
@@ -128,6 +151,7 @@ def candles_df(exchange: ccxt.bitvavo, market: str, interval: str, limit: int) -
     for c in ["open", "high", "low", "close", "volume"]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     return df.dropna().reset_index(drop=True)
+
 
 def place_market_buy(exchange: ccxt.bitvavo, market: str, amount_quote_eur: float):
     base, quote = market.split("/")
@@ -145,6 +169,7 @@ def place_market_buy(exchange: ccxt.bitvavo, market: str, amount_quote_eur: floa
 
     return order, filled, cost_total, avg_price, fee_q
 
+
 def place_market_sell_amount(
     exchange: ccxt.bitvavo, market: str, amount_base: float, last_price: float
 ):
@@ -157,13 +182,16 @@ def place_market_sell_amount(
 
     return order, proceeds_net, fee_q
 
-# ---------- Signalen ----------
+
+# =========================
+#   Signalen
+# =========================
 
 def compute_signals(df: pd.DataFrame, cfg: dict):
-    if cfg["signals"]["use_sma"]:
+    if cfg["signals"].get("use_sma", False):
         df["sma_fast"] = sma(df["close"], cfg["signals"]["sma_fast"])
         df["sma_slow"] = sma(df["close"], cfg["signals"]["sma_slow"])
-    if cfg["signals"]["use_rsi"]:
+    if cfg["signals"].get("use_rsi", False):
         df["rsi"] = rsi(df["close"], cfg["signals"]["rsi_len"])
     df = df.dropna().copy()
     if df.empty:
@@ -173,44 +201,64 @@ def compute_signals(df: pd.DataFrame, cfg: dict):
     buy = True
     sell = False
 
-    if cfg["signals"]["use_sma"]:
+    if cfg["signals"].get("use_sma", False):
         buy &= last["sma_fast"] > last["sma_slow"]
         sell |= last["sma_fast"] < last["sma_slow"]
 
-    if cfg["signals"]["use_rsi"]:
+    if cfg["signals"].get("use_rsi", False):
         buy &= last["rsi"] >= cfg["signals"]["rsi_buy_min"]
         sell |= last["rsi"] <= cfg["signals"]["rsi_sell_max"]
 
     return df, bool(buy), bool(sell)
 
-# ---------- Risk / sizing ----------
+
+# =========================
+#   Risk / sizing
+# =========================
 
 def can_buy(base: str, state: dict, cfg: dict, free_eur: float):
     risk = cfg["risk"]
+    eur_reserve = float(risk.get("eur_reserve", 0.0))
+
+    usable_eur = max(0.0, free_eur - eur_reserve)
+    if usable_eur <= 0:
+        return False, "reserve_reached", 0.0
+
     open_cnt = sum(1 for p in state["positions"].values() if p.get("open", False))
     if open_cnt >= risk["max_open_positions"]:
-        return False, "max_open_positions"
+        return False, "max_open_positions", 0.0
 
     cd = state["cooldown"].get(base)
     if cd:
         until = datetime.fromisoformat(cd)
         if now_ts() < until:
-            return False, "cooldown"
+            return False, "cooldown", 0.0
 
     pos = state["positions"].get(base)
     if pos and pos.get("open", False) and risk["only_buy_if_not_in_position"]:
-        return False, "already_in_position"
+        return False, "already_in_position", 0.0
 
-    per_coin_cap = free_eur * (risk["max_pct_per_coin"] / 100.0)
-    return True, per_coin_cap
+    per_coin_cap = usable_eur * (risk["max_pct_per_coin"] / 100.0)
+    return True, "ok", per_coin_cap
+
 
 def calc_stake(free_eur: float, cfg: dict) -> float:
     risk = cfg["risk"]
-    if risk["fixed_stake_quote"] > 0:
-        return min(risk["fixed_stake_quote"], free_eur)
-    return max(10.0, free_eur * risk["stake_fraction"])
+    eur_reserve = float(risk.get("eur_reserve", 0.0))
 
-# ---------- TP / SL ----------
+    usable_eur = max(0.0, free_eur - eur_reserve)
+    if usable_eur <= 0:
+        return 0.0
+
+    if risk["fixed_stake_quote"] > 0:
+        return min(risk["fixed_stake_quote"], usable_eur)
+
+    return max(10.0, usable_eur * risk["stake_fraction"])
+
+
+# =========================
+#   TP / SL
+# =========================
 
 def tp_sl_check(cur_price: float, pos: dict, prot: dict):
     avg = pos["avg_price"]
@@ -224,7 +272,10 @@ def tp_sl_check(cur_price: float, pos: dict, prot: dict):
 
     return tp_hit, sl_hit
 
-# ---------- Main loop ----------
+
+# =========================
+#   Main loop
+# =========================
 
 def main():
     cfg = load_cfg()
@@ -242,7 +293,7 @@ def main():
     sleep_s = cfg["logging"]["loop_sleep_seconds"]
     limit = cfg["logging"]["candles_limit"]
 
-    logging.info("Diamond-Pigs-stijl bot (ccxt, netto fees, extra logging) gestart")
+    logging.info("Diamond-Pigs-stijl bot gestart (Bitvavo, ccxt, netto fees, extra logging)")
 
     while True:
         try:
@@ -323,13 +374,14 @@ def main():
                                 ).isoformat()
                                 save_state(state)
                                 logging.info(
-                                    f"{market} verkocht. Netto PnL €{realized:.2f}, hold {holding_min:.1f} min"
+                                    f"{market} verkocht. Netto PnL €{realized:.2f}, "
+                                    f"totaal €{state['pnl_eur']:.2f}, hold {holding_min:.1f} min"
                                 )
                             else:
                                 logging.warning(f"{market} geen eigen {base}-positie om te verkopen")
 
                     # ---------- Koop ----------
-                    can, cap = can_buy(base, state, cfg, free_eur)
+                    can, reason, cap = can_buy(base, state, cfg, free_eur)
                     if can and buy_sig:
                         stake = calc_stake(free_eur, cfg)
                         if isinstance(cap, (int, float)):
@@ -365,10 +417,13 @@ def main():
 
                             save_state(state)
                             logging.info(
-                                f"{market} gekocht voor netto €{cost_total_eur:.2f} @ {avg_price:.2f}, spread {spread:.3f}%"
+                                f"{market} gekocht voor netto €{cost_total_eur:.2f} "
+                                f"@ {avg_price:.2f}, spread {spread:.3f}%"
                             )
                         else:
                             logging.debug(f"{market} inzet te laag: {stake:.2f}")
+                    elif not can and reason == "reserve_reached":
+                        logging.debug(f"{market} geen koop: EUR-reserve bereikt")
 
                 except Exception as e:
                     logging.exception(f"Fout bij market {market}: {e}")
@@ -377,6 +432,7 @@ def main():
             logging.exception(f"Hoofdlus fout: {e}")
 
         time.sleep(sleep_s)
+
 
 if __name__ == "__main__":
     main()
