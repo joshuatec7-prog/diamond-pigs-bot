@@ -1,30 +1,32 @@
+# config.yaml  (Trend v2)
 quote: EUR
-symbols: [BTC, ETH, ADA, SOL, XRP, LTC]
+symbols: [BTC, ETH, ADA, SOL, XRP]
 timeframe: "15m"
 
-signals:
-  use_sma: true
-  sma_fast: 10
-  sma_slow: 25
-  use_rsi: true
+strategy:
+  # Trend filter
+  sma_fast: 20
+  sma_slow: 50
+
+  # RSI filter
   rsi_len: 14
-  rsi_buy_min: 55      # koop alleen bij duidelijk momentum
-  rsi_sell_max: 45     # verkoop / geen nieuwe positie bij zwakte
+  rsi_buy_min: 55
+
+  # ATR exits
+  atr_len: 14
+  atr_tp_mult: 2.2     # take-profit = entry + 2.2 * ATR
+  atr_sl_mult: 1.4     # stop-loss   = entry - 1.4 * ATR
+  exit_on_trend_break: true
 
 risk:
-  fixed_stake_quote: 20     # vaste inzet per trade (winst wordt niet herbelegd)
-  stake_fraction: 0.00      # niet gebruikt omdat fixed_stake_quote > 0
-  max_open_positions: 6     # max aantal gelijktijdige coins
-  max_pct_per_coin: 25
+  fixed_stake_quote: 15      # vaste inzet per trade (winst wordt NIET herbelegd)
+  max_open_positions: 6
   only_buy_if_not_in_position: true
-  single_open_buy_per_coin: true
-  cooldown_minutes: 30      # minstens 30 min pauze per coin na sluiten
-  max_spread_pct: 0.15      # alleen handelen bij smalle spread
+  cooldown_minutes: 30
+  max_spread_pct: 0.12       # strenger dan 0.20, minder slechte fills
 
-protection:
-  take_profit_pct: 3.0
-  stop_loss_pct: 2.0
-  trailing_tp_pct: 0.0
+fees:
+  taker_fee_pct: 0.25        # pas aan naar jouw Bitvavo fee tier
 
 logging:
   level: INFO
