@@ -1,98 +1,28 @@
-#!/usr/bin/env python3
-import os
-import time
-import json
-import random
-import socket
-import logging
-import threading
-from datetime import datetime, timezone, timedelta
+# diamond_bot.py
+import os, time, json, math, logging, traceback
+from datetime import datetime, timezone
 from pathlib import Path
-from http.server import HTTPServer, BaseHTTPRequestHandler
 
 import pandas as pd
 import yaml
+from dotenv import load_dotenv
+
 import ccxt
 
-
 # =========================
-# Paden / bestanden
+# Files / paths
 # =========================
 ROOT = Path(__file__).parent
-CFG_FILE = ROOT / os.getenv("CFG_FILE", "metFig.yaml")
-STATE_FILE = ROOT / os.getenv("STATE_FILE", "staat.json")
-TRADES_CSV = ROOT / os.getenv("TRADES_CSV", "transacties.csv")
-
-# Dashboard
-DASHBOARD_ENABLED = os.getenv("DASHBOARD_ENABLED", "true").lower() in ("1", "true", "yes", "on")
-PORT = int(os.getenv("PORT", "10000"))  # Render Web Service gebruikt PORT
-
-TZ = timezone.utc
-
-# Bitvavo ENV
-BITVAVO_API_KEY = os.getenv("BITVAVO_API_KEY", "")
-BITVAVO_API_SECRET = os.getenv("BITVAVO_API_SECRET", "")
-BITVAVO_OPERATOR_ID = os.getenv("BITVAVO_OPERATOR_ID", "").strip()
-
-# Fee fallback (taker) als exchange fee niet beschikbaar is
-FEE_RATE_FALLBACK = float(os.getenv("FEE_RATE_FALLBACK", "0.0025"))  # 0.25%
-
+DEFAULT_CFG = ROOT / "config.yaml"
+FALLBACK_CFG = ROOT / "metFig.yaml"  # legacy name some repos use
+STATE_FILE = ROOT / "staat.json"     # keep your Dutch filename
+TRADES_CSV = ROOT / "transacties.csv"
 
 # =========================
-# Helpers
-# =========================
-def now_iso() -> str:
-    return datetime.now(TZ).isoformat()
-
-
-def pct(a: float, b: float) -> float:
-    return (a - b) / b * 100.0 if b else 0.0
-
-
-def load_cfg() -> dict:
-    if not CFG_FILE.exists():
-        raise FileNotFoundError(f"Config niet gevonden: {CFG_FILE}")
-    with open(CFG_FILE, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
-
-
-def load_state() -> dict:
-    if STATE_FILE.exists():
-        try:
-            s = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-            if isinstance(s, dict):
-                s.setdefault("pnl_eur", 0.0)
-                s.setdefault("closed_trades", 0)
-                s.setdefault("wins", 0)
-                s.setdefault("positions", {})
-                s.setdefault("cooldown", {})
-                return s
-        except Exception:
-            pass
-    return {
-        "pnl_eur": 0.0,
-        "closed_trades": 0,
-        "wins": 0,
-        "positions": {},   # per market: bot-owned positie
-        "cooldown": {},    # per market: iso timestamp
-    }
-
-
-def save_state(state: dict) -> None:
-    STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
-
-
-def append_trade(row: dict) -> None:
-    hdr = not TRADES_CSV.exists()
-    pd.DataFrame([row]).to_csv(TRADES_CSV, mode="a", index=False, header=hdr)
-
-
-# =========================
-# Indicatoren
+# Indicators
 # =========================
 def sma(series: pd.Series, length: int) -> pd.Series:
     return series.rolling(length).mean()
-
 
 def rsi(series: pd.Series, length: int = 14) -> pd.Series:
     delta = series.diff()
@@ -103,621 +33,502 @@ def rsi(series: pd.Series, length: int = 14) -> pd.Series:
     rs = roll_up / (roll_down.replace(0, 1e-12))
     return 100 - (100 / (1 + rs))
 
-
 def atr(df: pd.DataFrame, length: int = 14) -> pd.Series:
-    """
-    Average True Range.
-    df moet kolommen hebben: high, low, close
-    """
     high = df["high"]
     low = df["low"]
     close = df["close"]
     prev_close = close.shift(1)
-
     tr = pd.concat(
-        [(high - low), (high - prev_close).abs(), (low - prev_close).abs()],
+        [
+            (high - low).abs(),
+            (high - prev_close).abs(),
+            (low - prev_close).abs(),
+        ],
         axis=1,
     ).max(axis=1)
-
     return tr.rolling(length).mean()
 
-
 # =========================
-# Safe API calling (retries)
+# Helpers
 # =========================
-def _is_temporary_net_error(e: Exception) -> bool:
-    msg = str(e).lower()
-    needles = [
-        "timed out", "timeout",
-        "temporarily unavailable",
-        "connection reset", "connection aborted", "connection refused",
-        "remote disconnected",
-        "bad gateway", "service unavailable", "gateway timeout",
-        "502", "503", "504",
-        "rate limit", "too many requests",
-        "network error", "requesttimeout", "datanotavailable",
-        "bitvavo get https://api.bitvavo.com",
-    ]
-    if any(n in msg for n in needles):
-        return True
-    if isinstance(e, (TimeoutError, socket.timeout)):
-        return True
-    return False
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
 
+def safe_float(x, default=0.0) -> float:
+    try:
+        if x is None or (isinstance(x, float) and math.isnan(x)):
+            return default
+        return float(x)
+    except Exception:
+        return default
 
-def safe_call(fn, *, name: str = "call", retries: int = 8, base_sleep: float = 2.0, max_sleep: float = 60.0):
-    last = None
-    for attempt in range(1, retries + 1):
+def load_cfg() -> dict:
+    cfg_path = Path(os.getenv("CFG_FILE", str(DEFAULT_CFG)))
+    if not cfg_path.exists() and FALLBACK_CFG.exists():
+        cfg_path = FALLBACK_CFG
+
+    if not cfg_path.exists():
+        raise FileNotFoundError(f"Config file not found: {cfg_path}")
+
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+    cfg["_cfg_path"] = str(cfg_path)
+    return cfg
+
+def load_state() -> dict:
+    if STATE_FILE.exists():
         try:
-            return fn()
-        except Exception as e:
-            last = e
-            if not _is_temporary_net_error(e):
-                raise
-            sleep_s = min(max_sleep, base_sleep * (2 ** (attempt - 1)))
-            sleep_s = sleep_s * (0.7 + random.random() * 0.6)  # jitter
-            logging.warning(f"Tijdelijke API/netwerk fout bij {name} ({attempt}/{retries}): {e}. Wacht {sleep_s:.1f}s")
-            time.sleep(sleep_s)
-    raise last
+            return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {
+        "positions": {},         # only positions opened by THIS bot
+        "cooldown": {},          # per symbol next allowed buy time
+        "pnl_eur": 0.0,
+        "stats": {
+            "closed": 0,
+            "wins": 0,
+            "losses": 0,
+        },
+        "last_balance": {"EUR_free": None, "ts": None},
+    }
 
+def save_state(state: dict) -> None:
+    STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+
+def ensure_trades_header():
+    if TRADES_CSV.exists():
+        return
+    cols = [
+        "ts",
+        "market",
+        "side",
+        "reason",
+        "price",
+        "amount_base",
+        "quote_gross_eur",
+        "fee_eur",
+        "spread_pct",
+        "atr",
+        "tp_price",
+        "sl_price",
+        "holding_time_min",
+        "netto_pnl_eur",
+        "totaal_pnl_eur",
+        "winrate_pct",
+    ]
+    pd.DataFrame([], columns=cols).to_csv(TRADES_CSV, index=False)
+
+def append_trade(row: dict):
+    ensure_trades_header()
+    df = pd.DataFrame([row])
+    df.to_csv(TRADES_CSV, index=False, mode="a", header=False)
+
+def pct(a: float, b: float) -> float:
+    return 0.0 if b == 0 else (a / b) * 100.0
 
 # =========================
 # Exchange
 # =========================
-def make_exchange() -> ccxt.bitvavo:
-    if not BITVAVO_API_KEY or not BITVAVO_API_SECRET:
-        raise RuntimeError("BITVAVO_API_KEY / BITVAVO_API_SECRET ontbreken in Render env vars")
+def make_exchange(cfg: dict) -> ccxt.Exchange:
+    load_dotenv()
 
-    ex = ccxt.bitvavo({
-        "apiKey": BITVAVO_API_KEY,
-        "secret": BITVAVO_API_SECRET,
+    api_key = os.getenv("BITVAVO_API_KEY", "")
+    api_secret = os.getenv("BITVAVO_API_SECRET", "")
+    operator_id = os.getenv("BITVAVO_OPERATOR_ID", "").strip()
+
+    ex_params = {
         "enableRateLimit": True,
-        "options": {},
-    })
-    if BITVAVO_OPERATOR_ID:
-        ex.options["operatorId"] = BITVAVO_OPERATOR_ID
+    }
+    if api_key and api_secret:
+        ex_params["apiKey"] = api_key
+        ex_params["secret"] = api_secret
 
-    ex.timeout = 30000
+    # Bitvavo in ccxt now requires operatorId for createOrder
+    if operator_id:
+        try:
+            ex_params["options"] = {"operatorId": int(operator_id)}
+        except Exception:
+            ex_params["options"] = {"operatorId": operator_id}
+
+    ex = ccxt.bitvavo(ex_params)
     return ex
 
-
-def get_fee_rate(exchange: ccxt.bitvavo) -> float:
+def safe_fetch_balance(ex: ccxt.Exchange, state: dict, logger: logging.Logger) -> dict | None:
     try:
-        fees = getattr(exchange, "fees", None) or {}
-        tr = (fees.get("trading") or {})
-        taker = tr.get("taker", None)
-        if taker is not None:
-            return float(taker)
-    except Exception:
-        pass
-    return float(FEE_RATE_FALLBACK)
-
-
-def fetch_balance(exchange: ccxt.bitvavo) -> dict:
-    return safe_call(lambda: exchange.fetch_balance(), name="fetch_balance")
-
-
-def free_eur(balance: dict) -> float:
-    eur = balance.get("EUR") or {}
-    return float(eur.get("free", 0.0) or 0.0)
-
-
-def candles_df(exchange: ccxt.bitvavo, market: str, interval: str, limit: int) -> pd.DataFrame:
-    raw = safe_call(lambda: exchange.fetch_ohlcv(market, timeframe=interval, limit=limit), name=f"fetch_ohlcv {market}")
-    if not raw:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(raw, columns=["time", "open", "high", "low", "close", "volume"])
-    df["time"] = pd.to_datetime(df["time"], unit="ms", utc=True)
-    for c in ["open", "high", "low", "close", "volume"]:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-    return df.dropna().reset_index(drop=True)
-
-
-def orderbook_spread_pct(exchange: ccxt.bitvavo, market: str) -> float:
-    ob = safe_call(lambda: exchange.fetch_order_book(market, limit=1), name=f"fetch_order_book {market}")
-    bids = ob.get("bids") or []
-    asks = ob.get("asks") or []
-    bid = float(bids[0][0]) if bids else 0.0
-    ask = float(asks[0][0]) if asks else 0.0
-    if bid and ask:
-        return (ask - bid) / ((ask + bid) / 2) * 100.0
-    return 999.0
-
-
-def last_price(exchange: ccxt.bitvavo, market: str) -> float:
-    t = safe_call(lambda: exchange.fetch_ticker(market), name=f"fetch_ticker {market}")
-    return float(t["last"])
-
-
-def place_market_buy(exchange: ccxt.bitvavo, market: str, stake_eur: float, fee_rate: float):
-    px = last_price(exchange, market)
-    # ccxt market buy: amount in base
-    amount_base = max(0.0, (stake_eur / px) * (1.0 - fee_rate))
-    order = safe_call(lambda: exchange.create_order(market, "market", "buy", float(amount_base)), name=f"create_order BUY {market}")
-    return order, px
-
-
-def place_market_sell(exchange: ccxt.bitvavo, market: str, amount_base: float):
-    order = safe_call(lambda: exchange.create_order(market, "market", "sell", float(amount_base)), name=f"create_order SELL {market}")
-    return order
-
-
-def extract_order_fill(order: dict, fallback_price: float, fee_rate: float):
-    filled = float(order.get("filled") or order.get("amount") or 0.0)
-    avg = float(order.get("average") or 0.0) or float(order.get("price") or 0.0) or float(fallback_price)
-
-    cost = order.get("cost", None)
-    if cost is None:
-        cost = filled * avg
-    cost = float(cost)
-
-    fee = order.get("fee") or {}
-    fee_cost = fee.get("cost", None)
-    if fee_cost is None:
-        fee_cost = cost * fee_rate
-    fee_cost = float(fee_cost)
-
-    return filled, avg, cost, fee_cost
-
+        bal = ex.fetch_balance()
+        eur = bal.get("EUR") or {}
+        eur_free = safe_float(eur.get("free"), None)
+        if eur_free is not None:
+            state["last_balance"] = {"EUR_free": eur_free, "ts": now_utc().isoformat()}
+            return {"EUR_free": eur_free}
+        return None
+    except Exception as e:
+        # Safe fallback: use cached last_balance
+        cached = state.get("last_balance") or {}
+        eur_free = cached.get("EUR_free")
+        if eur_free is not None:
+            logger.warning(f"Balance fetch failed, using cached EUR_free={eur_free}. Error: {e}")
+            return {"EUR_free": float(eur_free)}
+        logger.error(f"Balance fetch failed and no cache available. Error: {e}")
+        return None
 
 # =========================
-# Signal (trend-only) + ATR filter
+# Strategy logic (Trend v2)
 # =========================
-def compute_signals(df: pd.DataFrame, cfg: dict):
-    sig = cfg.get("signals", {}) or {}
+def should_buy_trend_v2(df: pd.DataFrame, cfg: dict) -> tuple[bool, str]:
+    s = cfg["strategy"]
+    # Trend filter
+    sma_fast = sma(df["close"], int(s["sma_fast"]))
+    sma_slow = sma(df["close"], int(s["sma_slow"]))
+    trend_up = sma_fast.iloc[-1] > sma_slow.iloc[-1]
 
-    use_sma = bool(sig.get("use_sma", True))
-    use_rsi = bool(sig.get("use_rsi", True))
+    # Pullback entry: previous close below sma_fast, current close above sma_fast
+    prev_close = df["close"].iloc[-2]
+    curr_close = df["close"].iloc[-1]
+    prev_sma_fast = sma_fast.iloc[-2]
+    curr_sma_fast = sma_fast.iloc[-1]
+    cross_up = (prev_close < prev_sma_fast) and (curr_close > curr_sma_fast)
 
-    sma_fast = int(sig.get("sma_fast", 20))
-    sma_slow = int(sig.get("sma_slow", 50))
+    # RSI filter
+    r = rsi(df["close"], int(s["rsi_len"])).iloc[-1]
+    rsi_ok = r >= float(s["rsi_buy_min"])
 
-    rsi_len = int(sig.get("rsi_len", 14))
-    rsi_buy_min = float(sig.get("rsi_buy_min", 58))
-    rsi_sell_max = float(sig.get("rsi_sell_max", 48))
+    # Volatility / noise filter: require ATR available
+    a = atr(df, int(s["atr_len"])).iloc[-1]
+    atr_ok = not (math.isnan(a) or a <= 0)
 
-    use_atr_filter = bool(sig.get("use_atr_filter", False))
-    atr_len = int(sig.get("atr_len", 14))
-    min_atr_pct = float(sig.get("min_atr_pct", 0.0))
+    if trend_up and cross_up and rsi_ok and atr_ok:
+        return True, "TrendCrossUp"
+    return False, "NoSignal"
 
-    # Indicatoren
-    if use_sma:
-        df["sma_fast"] = sma(df["close"], sma_fast)
-        df["sma_slow"] = sma(df["close"], sma_slow)
-    if use_rsi:
-        df["rsi"] = rsi(df["close"], rsi_len)
+def should_sell(df: pd.DataFrame, pos: dict, cfg: dict) -> tuple[bool, str, float, float, float]:
+    s = cfg["strategy"]
+    a = atr(df, int(s["atr_len"])).iloc[-1]
+    if math.isnan(a) or a <= 0:
+        a = safe_float(pos.get("atr"), 0.0)
 
-    if use_atr_filter:
-        df["atr"] = atr(df, atr_len)
-        df["atr_pct"] = (df["atr"] / df["close"]) * 100.0
-    else:
-        df["atr_pct"] = float("nan")
+    entry = float(pos["entry_price"])
+    tp = entry + float(s["atr_tp_mult"]) * a
+    sl = entry - float(s["atr_sl_mult"]) * a
 
-    df = df.dropna().copy()
-    if len(df) < 3:
-        return df, False, False, 0.0, True  # atr_ok=True bij gebrek aan filter
+    last = float(df["close"].iloc[-1])
 
-    last = df.iloc[-1]
+    if last >= tp:
+        return True, "TakeProfit_ATR", a, tp, sl
+    if last <= sl:
+        return True, "StopLoss_ATR", a, tp, sl
 
-    # ATR filter check
-    atr_pct_last = float(last.get("atr_pct", float("nan")))
-    atr_ok = True
-    if use_atr_filter:
-        if not (atr_pct_last == atr_pct_last):  # NaN
-            atr_ok = False
-        elif atr_pct_last < min_atr_pct:
-            atr_ok = False
+    # Optional: exit if trend breaks down
+    sma_fast = sma(df["close"], int(s["sma_fast"])).iloc[-1]
+    sma_slow = sma(df["close"], int(s["sma_slow"])).iloc[-1]
+    if bool(s.get("exit_on_trend_break", True)) and sma_fast < sma_slow:
+        return True, "TrendBreak", a, tp, sl
 
-    # Trend-only buy: trend up + RSI momentum + ATR ok
-    buy_sig = True
-    sell_sig = False
-
-    if use_sma:
-        buy_sig &= last["sma_fast"] > last["sma_slow"]
-        sell_sig |= last["sma_fast"] < last["sma_slow"]
-
-    if use_rsi:
-        buy_sig &= last["rsi"] >= rsi_buy_min
-        sell_sig |= last["rsi"] <= rsi_sell_max
-
-    if use_atr_filter:
-        buy_sig &= atr_ok
-
-    return df, bool(buy_sig), bool(sell_sig), atr_pct_last, atr_ok
-
+    return False, "Hold", a, tp, sl
 
 # =========================
-# TP/SL/Trailing
+# Execution / risk
 # =========================
-def tp_sl_check(cur_price: float, pos: dict, prot: dict):
-    tp_pct = float(prot.get("take_profit_pct", 5.0))
-    sl_pct = float(prot.get("stop_loss_pct", 2.0))
-    tr_pct = float(prot.get("trailing_tp_pct", 2.0))
+def spread_pct_from_ticker(t: dict) -> float:
+    bid = safe_float(t.get("bid"), 0.0)
+    ask = safe_float(t.get("ask"), 0.0)
+    if bid <= 0 or ask <= 0:
+        return 999.0
+    mid = (bid + ask) / 2.0
+    return ((ask - bid) / mid) * 100.0
 
-    avg = float(pos["buy_price"])
+def calc_fee_eur(cfg: dict, quote_amount_eur: float) -> float:
+    fee_pct = float(cfg["fees"]["taker_fee_pct"])
+    return quote_amount_eur * (fee_pct / 100.0)
 
-    tp_hit = pct(cur_price, avg) >= tp_pct
-    sl_hit = pct(cur_price, avg) <= -abs(sl_pct)
+def can_open_new_position(symbol: str, state: dict, cfg: dict, eur_free: float) -> tuple[bool, str]:
+    r = cfg["risk"]
+    positions = state.get("positions", {})
+    max_open = int(r["max_open_positions"])
+    if len(positions) >= max_open:
+        return False, "MaxOpenPositions"
 
-    if tr_pct > 0 and float(pos.get("peak", 0.0) or 0.0) > 0:
-        giveback_hit = pct(cur_price, float(pos["peak"])) <= -abs(tr_pct)
-        tp_hit = tp_hit or giveback_hit
-
-    return tp_hit, sl_hit, tp_pct, sl_pct, tr_pct
-
-
-# =========================
-# Risk helpers
-# =========================
-def open_positions_count(state: dict) -> int:
-    return sum(1 for p in state["positions"].values() if p.get("open", False))
-
-
-def can_buy_market(state: dict, market: str, risk: dict) -> bool:
-    pos = state["positions"].get(market, {})
-    if bool(risk.get("only_buy_if_not_in_position", True)) and bool(pos.get("open", False)):
-        return False
-
-    cd_iso = state["cooldown"].get(market)
-    if cd_iso:
+    # cooldown
+    cd = state.get("cooldown", {}).get(symbol)
+    if cd:
         try:
-            if datetime.fromisoformat(cd_iso) > datetime.now(TZ):
-                return False
+            if now_utc().timestamp() < float(cd):
+                return False, "Cooldown"
         except Exception:
             pass
-    return True
 
+    # avoid multiple simultaneous buys per coin
+    if bool(r.get("only_buy_if_not_in_position", True)) and symbol in positions:
+        return False, "AlreadyInPosition"
 
-# =========================
-# Dashboard
-# =========================
-STATE_CACHE = {"status": {}}
+    stake = float(r["fixed_stake_quote"])
+    if stake <= 0:
+        return False, "StakeNotSet"
+    if eur_free < stake:
+        return False, "InsufficientEUR"
 
+    return True, "OK"
 
-def build_status_snapshot(state: dict) -> dict:
-    closed = int(state.get("closed_trades", 0))
-    wins = int(state.get("wins", 0))
-    winrate = (100.0 * wins / closed) if closed else 0.0
+def place_market_buy(ex: ccxt.Exchange, market: str, stake_eur: float) -> dict:
+    # Use ticker ask to compute base amount
+    t = ex.fetch_ticker(market)
+    ask = safe_float(t.get("ask"), 0.0) or safe_float(t.get("last"), 0.0)
+    if ask <= 0:
+        raise RuntimeError("No valid ask/last price for buy")
 
-    positions = []
-    for market, p in state.get("positions", {}).items():
-        if not p.get("open"):
-            continue
-        positions.append({
-            "market": market,
-            "amount_base": p.get("amount_base", 0.0),
-            "buy_price": p.get("buy_price", 0.0),
-            "buy_total_eur": p.get("buy_total_eur", 0.0),
-            "opened_ts": p.get("opened_ts", ""),
-            "peak": p.get("peak", 0.0),
-        })
+    amount_base = stake_eur / ask
+    # precision
+    amount_base = float(ex.amount_to_precision(market, amount_base))
+    if amount_base <= 0:
+        raise RuntimeError("Computed amount_base <= 0")
 
-    return {
-        "ts": now_iso(),
-        "pnl_eur": round(float(state.get("pnl_eur", 0.0)), 2),
-        "closed_trades": closed,
-        "wins": wins,
-        "winrate_pct": round(winrate, 2),
-        "open_positions": positions,
-    }
+    order = ex.create_order(market, "market", "buy", amount_base)
+    return {"order": order, "ticker": t, "price": ask, "amount_base": amount_base}
 
+def place_market_sell(ex: ccxt.Exchange, market: str, amount_base: float) -> dict:
+    amount_base = float(ex.amount_to_precision(market, amount_base))
+    if amount_base <= 0:
+        raise RuntimeError("Sell amount_base <= 0")
 
-def read_last_trades(n: int = 50):
-    if not TRADES_CSV.exists():
-        return []
-    try:
-        df = pd.read_csv(TRADES_CSV)
-        if df.empty:
-            return []
-        return df.tail(n).to_dict(orient="records")
-    except Exception:
-        return []
+    t = ex.fetch_ticker(market)
+    bid = safe_float(t.get("bid"), 0.0) or safe_float(t.get("last"), 0.0)
+    if bid <= 0:
+        raise RuntimeError("No valid bid/last price for sell")
 
-
-class DashboardHandler(BaseHTTPRequestHandler):
-    def _send(self, code: int, body: bytes, ctype: str):
-        self.send_response(code)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
-
-    def do_GET(self):
-        if self.path.startswith("/health"):
-            self._send(200, b"ok", "text/plain; charset=utf-8")
-            return
-
-        if self.path.startswith("/api/status"):
-            data = {
-                "status": STATE_CACHE.get("status", {}),
-                "trades": read_last_trades(50),
-            }
-            self._send(200, json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8"),
-                       "application/json; charset=utf-8")
-            return
-
-        status = STATE_CACHE.get("status", {})
-        trades = read_last_trades(30)
-
-        rows_pos = ""
-        for p in status.get("open_positions", []):
-            rows_pos += (
-                f"<tr><td>{p['market']}</td><td>{p.get('amount_base',0):.8f}</td>"
-                f"<td>{p.get('buy_price',0):.8f}</td><td>{p.get('peak',0):.8f}</td>"
-                f"<td>{p.get('opened_ts','')}</td></tr>"
-            )
-        if not rows_pos:
-            rows_pos = "<tr><td colspan='5'>Geen</td></tr>"
-
-        rows_tr = ""
-        for t in trades:
-            rows_tr += (
-                f"<tr><td>{t.get('ts','')}</td><td>{t.get('markt','')}</td><td>{t.get('zijde','')}</td>"
-                f"<td>{t.get('prijs','')}</td><td>{t.get('netto_pnl_eur','')}</td><td>{t.get('reden','')}</td></tr>"
-            )
-        if not rows_tr:
-            rows_tr = "<tr><td colspan='6'>Nog geen trades</td></tr>"
-
-        html = f"""<!doctype html>
-<html lang="nl">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Diamond Bot Dashboard</title>
-<style>
-body {{ font-family: Arial, sans-serif; margin: 20px; }}
-.card {{ border: 1px solid #ddd; border-radius: 10px; padding: 12px; margin-bottom: 14px; }}
-.small {{ color: #555; font-size: 12px; }}
-table {{ border-collapse: collapse; width: 100%; }}
-th, td {{ border-bottom: 1px solid #eee; padding: 8px; text-align: left; font-size: 13px; }}
-</style>
-</head>
-<body>
-<h1>Diamond Bot Dashboard</h1>
-<div class="small">Laatste update: {status.get("ts","")}</div>
-
-<div class="card">
-  <div><b>Totaal PnL:</b> € {status.get("pnl_eur", 0.0)}</div>
-  <div><b>Gesloten trades:</b> {status.get("closed_trades", 0)}</div>
-  <div><b>Winrate:</b> {status.get("winrate_pct", 0.0)}%</div>
-</div>
-
-<div class="card">
-  <h3>Open posities</h3>
-  <table>
-    <thead><tr><th>Market</th><th>Amount</th><th>Buy</th><th>Peak</th><th>Opened</th></tr></thead>
-    <tbody>{rows_pos}</tbody>
-  </table>
-</div>
-
-<div class="card">
-  <h3>Laatste trades</h3>
-  <table>
-    <thead><tr><th>ts</th><th>markt</th><th>zijde</th><th>prijs</th><th>netto_pnl_eur</th><th>reden</th></tr></thead>
-    <tbody>{rows_tr}</tbody>
-  </table>
-</div>
-
-<div class="small">API: <a href="/api/status">/api/status</a></div>
-</body>
-</html>"""
-        self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
-
-
-def run_dashboard():
-    srv = HTTPServer(("0.0.0.0", PORT), DashboardHandler)
-    logging.info(f"Dashboard actief op poort {PORT} (/, /api/status, /health)")
-    srv.serve_forever()
-
+    order = ex.create_order(market, "market", "sell", amount_base)
+    return {"order": order, "ticker": t, "price": bid, "amount_base": amount_base}
 
 # =========================
-# Main
+# Main loop
 # =========================
-def main():
-    cfg = load_cfg()
-    state = load_state()
-
-    log_cfg = cfg.get("logging", {}) or {}
-    lvl = str(log_cfg.get("level", "INFO")).upper()
+def setup_logging(cfg: dict) -> logging.Logger:
+    lvl = str(cfg.get("logging", {}).get("level", "INFO")).upper()
     logging.basicConfig(
         level=getattr(logging, lvl, logging.INFO),
         format="%(asctime)s %(levelname)s %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+    return logging.getLogger("diamond_bot")
 
-    exchange = make_exchange()
-    fee_rate = get_fee_rate(exchange)
+def fetch_ohlcv_df(ex: ccxt.Exchange, market: str, timeframe: str, limit: int) -> pd.DataFrame:
+    o = ex.fetch_ohlcv(market, timeframe=timeframe, limit=limit)
+    df = pd.DataFrame(o, columns=["ts", "open", "high", "low", "close", "volume"])
+    df["ts"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
+    return df
 
-    quote = str(cfg.get("quote", "EUR")).upper()
-    symbols = cfg.get("symbols", [])
-    timeframe = str(cfg.get("timeframe", "15m"))
-    candles_limit = int(log_cfg.get("candles_limit", 400))
-    sleep_s = int(log_cfg.get("loop_sleep_seconds", 30))
+def main():
+    cfg = load_cfg()
+    logger = setup_logging(cfg)
 
-    risk = cfg.get("risk", {}) or {}
-    prot = cfg.get("protection", {}) or {}
+    logger.info(f"Trend v2 bot started. Config={cfg.get('_cfg_path')}")
+    ensure_trades_header()
 
-    fixed_stake = float(risk.get("fixed_stake_quote", 15))
-    stake_fraction = float(risk.get("stake_fraction", 0.0))  # niet gebruikt als fixed_stake > 0
+    ex = make_exchange(cfg)
 
-    max_open_positions = int(risk.get("max_open_positions", 2))
-    cooldown_minutes = int(risk.get("cooldown_minutes", 60))
-    max_spread_pct = float(risk.get("max_spread_pct", 0.12))
-    eur_reserve = float(risk.get("eur_reserve", 50.0))
+    # If operatorId missing, allow read-only mode (no trading)
+    operator_ok = bool((ex.options or {}).get("operatorId"))
+    keys_ok = bool(getattr(ex, "apiKey", "") and getattr(ex, "secret", ""))
 
-    markets = [f"{s}/{quote}" for s in symbols]
+    if not keys_ok:
+        logger.warning("No API keys detected. Bot will run in READ-ONLY mode.")
+    if not operator_ok:
+        logger.warning("BITVAVO_OPERATOR_ID missing. Bot can NOT place orders (Bitvavo requires operatorId).")
 
-    state.setdefault("positions", {})
-    state.setdefault("cooldown", {})
-    state.setdefault("pnl_eur", 0.0)
-    state.setdefault("closed_trades", 0)
-    state.setdefault("wins", 0)
+    state = load_state()
 
-    logging.info("Diamond bot gestart (trend-only + ATR filter + safe retries)")
+    symbols = cfg["symbols"]
+    quote = cfg["quote"]
+    timeframe = cfg["timeframe"]
+    candles_limit = int(cfg["logging"]["candles_limit"])
+    sleep_s = int(cfg["logging"]["loop_sleep_seconds"])
 
-    if DASHBOARD_ENABLED:
-        threading.Thread(target=run_dashboard, daemon=True).start()
+    risk = cfg["risk"]
+    max_spread = float(risk["max_spread_pct"])
+    cooldown_min = float(risk["cooldown_minutes"])
+    stake_eur = float(risk["fixed_stake_quote"])
 
     while True:
         try:
-            bal = fetch_balance(exchange)
-            free = free_eur(bal)
-            usable = max(0.0, free - eur_reserve)
-            logging.info(f"Vrij EUR: {free:.2f} (bruikbaar: {usable:.2f})")
+            # Balance
+            eur_free = None
+            bal = None
+            if keys_ok:
+                bal = safe_fetch_balance(ex, state, logger)
+                eur_free = bal["EUR_free"] if bal else None
 
-            STATE_CACHE["status"] = build_status_snapshot(state)
+            if eur_free is not None:
+                logger.info(f"Vrij EUR: {eur_free:.2f}")
 
-            for market in markets:
+            # Iterate markets
+            for base in symbols:
+                market = f"{base}/{quote}"
+
+                # Load candles
                 try:
-                    # Spread filter
-                    spread = orderbook_spread_pct(exchange, market)
-                    if spread > max_spread_pct:
+                    df = fetch_ohlcv_df(ex, market, timeframe, candles_limit)
+                    if len(df) < max(int(cfg["strategy"]["sma_slow"]), int(cfg["strategy"]["atr_len"])) + 5:
                         continue
+                except Exception as e:
+                    logger.warning(f"{market}: candle fetch failed: {e}")
+                    continue
 
-                    # Candles + signals
-                    df = candles_df(exchange, market, timeframe, candles_limit)
-                    if df.empty:
-                        continue
+                # Spread filter
+                try:
+                    t = ex.fetch_ticker(market)
+                    sp = spread_pct_from_ticker(t)
+                except Exception:
+                    sp = 999.0
 
-                    df, buy_sig, sell_sig, atr_pct_last, atr_ok = compute_signals(df, cfg)
-                    if df.empty:
-                        continue
+                if sp > max_spread:
+                    continue
 
-                    px = float(df.iloc[-1]["close"])
+                positions = state.get("positions", {})
+                in_pos = market in positions
 
-                    pos = state["positions"].get(market, {"open": False})
-                    state["positions"].setdefault(market, pos)
-
-                    # Update peak
-                    if pos.get("open"):
-                        peak = float(pos.get("peak", pos.get("buy_price", px)) or px)
-                        if px > peak:
-                            pos["peak"] = px
-
-                    # SELL: alleen bot-owned posities
-                    if pos.get("open"):
-                        tp_hit, sl_hit, tp_pct, sl_pct, tr_pct = tp_sl_check(px, pos, prot)
-                        reason = None
-                        if sl_hit:
-                            reason = "SL"
-                        elif tp_hit:
-                            reason = "TP"
-                        elif sell_sig:
-                            reason = "Signaal"
-
-                        if reason:
+                # SELL logic only for bot-managed positions
+                if in_pos:
+                    pos = positions[market]
+                    do_sell, reason, a, tp, sl = should_sell(df, pos, cfg)
+                    if do_sell and keys_ok and operator_ok:
+                        try:
                             amount_base = float(pos["amount_base"])
-                            order = place_market_sell(exchange, market, amount_base)
-                            filled, avg, sell_cost, sell_fee = extract_order_fill(order, px, fee_rate)
+                            sell = place_market_sell(ex, market, amount_base)
+                            sell_price = float(sell["price"])
+                            sell_quote_gross = sell_price * amount_base
+                            sell_fee = calc_fee_eur(cfg, sell_quote_gross)
 
-                            buy_total = float(pos.get("buy_total_eur", 0.0))
-                            net_received = sell_cost - sell_fee
-                            net_pnl = net_received - buy_total
+                            buy_cost = float(pos["quote_cost_eur"])
+                            buy_fee = float(pos["buy_fee_eur"])
+                            net_pnl = sell_quote_gross - sell_fee - buy_cost - buy_fee
 
-                            opened_ts = datetime.fromisoformat(pos["opened_ts"])
-                            hold_min = (datetime.now(TZ) - opened_ts).total_seconds() / 60.0
+                            # holding time
+                            entry_ts = datetime.fromisoformat(pos["entry_ts"])
+                            hold_min = (now_utc() - entry_ts).total_seconds() / 60.0
 
-                            state["pnl_eur"] = float(state.get("pnl_eur", 0.0)) + float(net_pnl)
-                            state["closed_trades"] = int(state.get("closed_trades", 0)) + 1
+                            # stats
+                            state["pnl_eur"] = float(state.get("pnl_eur", 0.0)) + net_pnl
+                            state["stats"]["closed"] = int(state["stats"]["closed"]) + 1
                             if net_pnl > 0:
-                                state["wins"] = int(state.get("wins", 0)) + 1
-                            winrate = (100.0 * state["wins"] / state["closed_trades"]) if state["closed_trades"] else 0.0
+                                state["stats"]["wins"] = int(state["stats"]["wins"]) + 1
+                            else:
+                                state["stats"]["losses"] = int(state["stats"]["losses"]) + 1
+
+                            closed = int(state["stats"]["closed"])
+                            wins = int(state["stats"]["wins"])
+                            winrate = pct(wins, closed)
+
+                            # cooldown
+                            state.setdefault("cooldown", {})[market] = now_utc().timestamp() + cooldown_min * 60.0
 
                             append_trade({
-                                "ts": now_iso(),
-                                "markt": market,
-                                "modus": "trend",
-                                "zijde": "VERKOPEN",
-                                "bedrag_basis": float(filled),
-                                "kosten_eur": float(sell_fee),
-                                "spread_pct": float(spread),
-                                "netto_eur": float(net_received),
-                                "prijs": float(avg),
-                                "holding_time_min": float(hold_min),
-                                "netto_pnl_eur": float(net_pnl),
-                                "reden": reason,
-                                "atr_pct": float(atr_pct_last) if (atr_pct_last == atr_pct_last) else None,
+                                "ts": now_utc().isoformat(),
+                                "market": market,
+                                "side": "VERKOPEN",
+                                "reason": reason,
+                                "price": round(sell_price, 10),
+                                "amount_base": round(amount_base, 10),
+                                "quote_gross_eur": round(sell_quote_gross, 2),
+                                "fee_eur": round(sell_fee, 4),
+                                "spread_pct": round(sp, 4),
+                                "atr": round(a, 10),
+                                "tp_price": round(tp, 10),
+                                "sl_price": round(sl, 10),
+                                "holding_time_min": round(hold_min, 2),
+                                "netto_pnl_eur": round(net_pnl, 2),
+                                "totaal_pnl_eur": round(float(state["pnl_eur"]), 2),
+                                "winrate_pct": round(winrate, 2),
                             })
 
-                            pos.update({"open": False})
-                            state["cooldown"][market] = (datetime.now(TZ) + timedelta(minutes=cooldown_minutes)).isoformat()
-                            save_state(state)
-
-                            logging.info(
+                            logger.info(
                                 f"{market} verkocht. Netto PnL €{net_pnl:.2f}, totaal €{state['pnl_eur']:.2f}, "
-                                f"trades {state['closed_trades']}, winrate {winrate:.1f}%, hold {hold_min:.1f} min"
+                                f"trades {closed}, winrate {winrate:.2f}%, hold {hold_min:.1f} min"
                             )
 
-                    # BUY: trend-only + ATR
-                    else:
-                        if not can_buy_market(state, market, risk):
-                            continue
-                        if open_positions_count(state) >= max_open_positions:
-                            continue
-                        if not buy_sig:
-                            continue
-                        if usable <= 0:
-                            continue
+                            # remove position
+                            del positions[market]
+                            state["positions"] = positions
+                            save_state(state)
 
-                        # stake
-                        stake = fixed_stake if fixed_stake > 0 else (usable * stake_fraction)
-                        stake = float(stake)
+                        except Exception as e:
+                            logger.error(f"{market}: sell failed: {e}")
+                            logger.debug(traceback.format_exc())
 
-                        if stake <= 0 or usable < stake:
-                            continue
+                    continue  # do not buy same loop if in position
 
-                        # Koop
-                        order, fallback_px = place_market_buy(exchange, market, stake, fee_rate)
-                        filled, avg, buy_cost, buy_fee = extract_order_fill(order, fallback_px, fee_rate)
-                        buy_total = buy_cost + buy_fee
+                # BUY logic
+                if keys_ok and operator_ok and eur_free is not None:
+                    ok, why = can_open_new_position(market, state, cfg, eur_free)
+                    if not ok:
+                        continue
 
-                        state["positions"][market] = {
-                            "open": True,
-                            "amount_base": float(filled),
-                            "buy_price": float(avg),
-                            "buy_cost_eur": float(buy_cost),
-                            "buy_fee_eur": float(buy_fee),
-                            "buy_total_eur": float(buy_total),
-                            "opened_ts": now_iso(),
-                            "peak": float(avg),
+                    buy_signal, sig_reason = should_buy_trend_v2(df, cfg)
+                    if not buy_signal:
+                        continue
+
+                    # place buy
+                    try:
+                        buy = place_market_buy(ex, market, stake_eur)
+                        buy_price = float(buy["price"])
+                        amount_base = float(buy["amount_base"])
+                        quote_gross = buy_price * amount_base
+                        buy_fee = calc_fee_eur(cfg, quote_gross)
+
+                        # store position (only bot-managed)
+                        a = atr(df, int(cfg["strategy"]["atr_len"])).iloc[-1]
+                        positions = state.get("positions", {})
+                        positions[market] = {
+                            "entry_price": buy_price,
+                            "amount_base": amount_base,
+                            "entry_ts": now_utc().isoformat(),
+                            "quote_cost_eur": quote_gross,
+                            "buy_fee_eur": buy_fee,
+                            "atr": safe_float(a, 0.0),
+                            "signal": sig_reason,
                         }
-                        save_state(state)
+                        state["positions"] = positions
+
+                        # cooldown to avoid immediate rebuys
+                        state.setdefault("cooldown", {})[market] = now_utc().timestamp() + cooldown_min * 60.0
 
                         append_trade({
-                            "ts": now_iso(),
-                            "markt": market,
-                            "modus": "trend",
-                            "zijde": "KOPEN",
-                            "bedrag_basis": float(filled),
-                            "kosten_eur": float(buy_fee),
-                            "spread_pct": float(spread),
-                            "netto_eur": float(buy_total),
-                            "prijs": float(avg),
-                            "holding_time_min": 0.0,
-                            "netto_pnl_eur": 0.0,
-                            "reden": "Signaal",
-                            "atr_pct": float(atr_pct_last) if (atr_pct_last == atr_pct_last) else None,
+                            "ts": now_utc().isoformat(),
+                            "market": market,
+                            "side": "KOPEN",
+                            "reason": sig_reason,
+                            "price": round(buy_price, 10),
+                            "amount_base": round(amount_base, 10),
+                            "quote_gross_eur": round(quote_gross, 2),
+                            "fee_eur": round(buy_fee, 4),
+                            "spread_pct": round(sp, 4),
+                            "atr": round(safe_float(a, 0.0), 10),
+                            "tp_price": "",
+                            "sl_price": "",
+                            "holding_time_min": "",
+                            "netto_pnl_eur": "",
+                            "totaal_pnl_eur": round(float(state.get("pnl_eur", 0.0)), 2),
+                            "winrate_pct": round(pct(int(state["stats"]["wins"]), max(1, int(state["stats"]["closed"]))), 2),
                         })
 
-                        logging.info(
-                            f"{market} gekocht. Netto €{buy_total:.2f} @ {avg:.6f}, spread {spread:.3f}%, ATR% {atr_pct_last:.3f} (ok={atr_ok})"
+                        logger.info(
+                            f"{market} gekocht voor netto €{quote_gross - buy_fee:.2f} @ {buy_price:.6g}, spread {sp:.3f}%"
                         )
 
-                except Exception as e:
-                    logging.exception(f"Fout bij {market}: {e}")
+                        save_state(state)
 
-            STATE_CACHE["status"] = build_status_snapshot(state)
+                    except Exception as e:
+                        logger.error(f"{market}: buy failed: {e}")
+                        logger.debug(traceback.format_exc())
+
             time.sleep(sleep_s)
 
+        except KeyboardInterrupt:
+            logger.info("Stopped by user.")
+            break
         except Exception as e:
-            if _is_temporary_net_error(e):
-                logging.warning(f"Tijdelijke fout in hoofdloop: {e}. Wacht 20s en ga verder.")
-                time.sleep(20)
-                continue
-            logging.exception(f"Hoofdfout: {e}")
-            time.sleep(10)
-
+            logger.error(f"Loop error: {e}")
+            logger.debug(traceback.format_exc())
+            time.sleep(max(5, sleep_s))
 
 if __name__ == "__main__":
     main()
