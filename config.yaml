@@ -17,11 +17,11 @@ strategie:
   atr_len: 14
   atr_tp_mult: 2.2
   atr_sl_mult: 1.4
-  exit_on_trend_break: true
+  exit_on_trend_break: True
 
 risico:
   vaste_inzetkoers: 15
   max_open_posities: 6
-  alleen_kopen_als_je_niet_in_de_positie: true
+  alleen_kopen_als_je_niet_in_de_positie: True
   afkoeltijd_minuten: 30
   max_spread_pct: 0.12
