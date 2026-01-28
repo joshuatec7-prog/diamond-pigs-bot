@@ -1,27 +1,15 @@
-# config.yaml (Trend v2)
-
-citaat: EUR
-symbolen: [BTC, ETH, ADA, SOL, XRP]
-tijdsbestek: "15m"
-
 strategie:
-  # Trendfilter
   sma_fast: 20
-  sma_slow: 50
+  sma_slow: 60
 
-  # RSI-filter
   rsi_len: 14
-  rsi_buy_min: 55
+  rsi_buy_min: 58
 
-  # ATR-uitgangen
   atr_len: 14
-  atr_tp_mult: 2.2
-  atr_sl_mult: 1.4
-  exit_on_trend_break: True
+  atr_tp_mult: 2.0
+  atr_sl_mult: 1.8
+  exit_on_trend_break: WAAR
 
 risico:
-  vaste_inzetkoers: 15
-  max_open_posities: 6
-  alleen_kopen_als_je_niet_in_de_positie: True
-  afkoeltijd_minuten: 30
-  max_spread_pct: 0.12
+  afkoeltijd_minuten: 45
+  max_spread_pct: 0.10
