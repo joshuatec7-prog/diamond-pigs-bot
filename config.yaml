@@ -1,15 +1,42 @@
-strategie:
+quote: EUR
+symbols: [BTC, ETH, ADA, SOL, XRP]
+timeframe: "15m"
+
+signals:
+  use_sma: true
   sma_fast: 20
   sma_slow: 60
 
+  use_rsi: true
   rsi_len: 14
   rsi_buy_min: 58
 
+  use_atr: true
   atr_len: 14
   atr_tp_mult: 2.0
   atr_sl_mult: 1.8
+
   exit_on_trend_break: WAAR
 
-risico:
-  afkoeltijd_minuten: 45
+  # optional
+  use_atr_filter: false
+  min_atr_pct: 0.25
+
+risk:
+  fixed_stake_quote: 15
+  max_open_positions: 2
+  only_buy_if_not_in_position: true
+  cooldown_minutes: 45
+
+  # Spread in PERCENT (0.10 = 0.10%)
   max_spread_pct: 0.10
+
+  eur_reserve: 50
+
+fees:
+  taker_fee_pct: 0.25
+
+logging:
+  level: INFO
+  loop_sleep_seconds: 30
+  candles_limit: 400
