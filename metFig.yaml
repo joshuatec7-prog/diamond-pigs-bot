@@ -1,4 +1,4 @@
-# config.yaml (STRICT ENGLISH; unknown keys will stop the bot)
+# config.yaml (paste-ready, STRICT ENGLISH)
 quote: EUR
 symbols: [BTC, ETH, ADA, SOL, XRP]
 timeframe: "15m"
@@ -10,7 +10,7 @@ signals:
 
   use_rsi: true
   rsi_len: 14
-  rsi_buy_min: 58
+  rsi_buy_min: 55
 
   use_atr: true
   atr_len: 14
@@ -24,19 +24,24 @@ signals:
   min_atr_pct: 0.25
 
 risk:
-  # Set to true first to test safely (no real orders)
+  # Set true first if you want to test without real orders
   dry_run: false
 
   fixed_stake_quote: 15
   max_open_positions: 2
   only_buy_if_not_in_position: true
-  cooldown_minutes: 45
 
-  # Spread in PERCENT: 0.10 = 0.10% (very strict)
-  max_spread_pct: 0.10
+  # Cooldown per market after BUY or SELL
+  cooldown_minutes: 30
 
-  # Keep cash aside
+  # Spread in PERCENT: 0.25 = 0.25%
+  max_spread_pct: 0.25
+
+  # Keep EUR aside so the bot doesn't use the full balance
   eur_reserve: 50
+
+  # Log skip reasons at most once per X seconds per market+reason
+  skip_log_every_seconds: 600
 
 fees:
   taker_fee_pct: 0.25
