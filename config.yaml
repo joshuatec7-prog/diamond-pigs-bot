@@ -18,19 +18,12 @@ signals:
 
   exit_on_trend_break: WAAR
 
-  # optional
-  use_atr_filter: false
-  min_atr_pct: 0.25
-
 risk:
   fixed_stake_quote: 15
   max_open_positions: 2
   only_buy_if_not_in_position: true
   cooldown_minutes: 45
-
-  # Spread in PERCENT (0.10 = 0.10%)
   max_spread_pct: 0.10
-
   eur_reserve: 50
 
 fees:
