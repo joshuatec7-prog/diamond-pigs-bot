@@ -9,7 +9,7 @@ signals:
 
   use_rsi: true
   rsi_len: 14
-  rsi_buy_min: 58
+  rsi_buy_min: 55
 
   use_atr: true
   atr_len: 14
@@ -18,13 +18,21 @@ signals:
 
   exit_on_trend_break: WAAR
 
+  use_atr_filter: false
+  min_atr_pct: 0.25
+
 risk:
+  dry_run: false
+
   fixed_stake_quote: 15
   max_open_positions: 2
   only_buy_if_not_in_position: true
-  cooldown_minutes: 45
-  max_spread_pct: 0.10
+
+  cooldown_minutes: 30
+  max_spread_pct: 0.25
   eur_reserve: 50
+
+  skip_log_every_seconds: 600
 
 fees:
   taker_fee_pct: 0.25
