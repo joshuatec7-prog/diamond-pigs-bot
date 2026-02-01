@@ -1,50 +1,44 @@
+# config.yaml (ENGLISH, matches the bot above)
+
 quote: EUR
 symbols: [BTC, ETH, ADA, SOL, XRP]
 timeframe: "15m"
 
 signals:
-  # Trend-only filters
   use_sma: true
   sma_fast: 20
-  sma_slow: 50
+  sma_slow: 60
 
   use_rsi: true
   rsi_len: 14
   rsi_buy_min: 58
-  rsi_sell_max: 48
 
-  # Extra: alleen traden als er genoeg beweging is
-  use_atr_filter: true
+  use_atr: true
   atr_len: 14
+  atr_tp_mult: 2.0
+  atr_sl_mult: 1.8
+
+  # Sell if trend breaks (SMA fast < SMA slow)
+  exit_on_trend_break: WAAR
+
+  # Optional: only trade if volatility is high enough (ATR% of price)
+  use_atr_filter: false
   min_atr_pct: 0.25
 
 risk:
-  fixed_stake_quote: 15        # vaste inzet per trade, winst wordt niet herbelegd
-  stake_fraction: 0.00
-
-  # Minder exposure tegelijk
+  fixed_stake_quote: 15
   max_open_positions: 2
-  max_pct_per_coin: 25
-
   only_buy_if_not_in_position: true
-  single_open_buy_per_coin: true
-
-  # Veel minder frequent traden
   cooldown_minutes: 60
 
-  # Strenger: slechte fills vermijden
+  # Spread in PERCENT (0.12 = 0.12%):
   max_spread_pct: 0.12
 
-  # Extra reserve zodat je niet “leeg” handelt
+  # Keep EUR aside so you don't trade the account empty
   eur_reserve: 50
 
-protection:
-  # Verder van de prijs zodat fees minder slopen
-  take_profit_pct: 5.0
-  stop_loss_pct: 2.0
-
-  # Laat winnaars doorlopen
-  trailing_tp_pct: 2.0
+fees:
+  taker_fee_pct: 0.25
 
 logging:
   level: INFO
