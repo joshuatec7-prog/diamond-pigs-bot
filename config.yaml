@@ -13,8 +13,8 @@ signals:
 
   use_atr: true
   atr_len: 14
-  atr_tp_mult: 2.0
-  atr_sl_mult: 1.8
+  atr_tp_mult: 2.5
+  atr_sl_mult: 1.6
 
   exit_on_trend_break: WAAR
 
