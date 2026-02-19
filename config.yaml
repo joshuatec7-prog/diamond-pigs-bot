@@ -1,5 +1,7 @@
+# COPY/PASTE into config.yaml (KITE, €50 per trade)
+
 quote: EUR
-symbols: [BTC, ETH, ADA, SOL, XRP]
+symbols: [KITE]
 timeframe: "15m"
 
 signals:
@@ -13,25 +15,24 @@ signals:
 
   use_atr: true
   atr_len: 14
-  atr_tp_mult: 2.5
-  atr_sl_mult: 1.6
+  atr_tp_mult: 2.2
+  atr_sl_mult: 1.8
 
   exit_on_trend_break: WAAR
 
-  use_atr_filter: false
-  min_atr_pct: 0.25
+  use_atr_filter: true
+  min_atr_pct: 0.30
 
 risk:
   dry_run: false
 
-  fixed_stake_quote: 15
-  max_open_positions: 2
+  fixed_stake_quote: 50
+  max_open_positions: 1
   only_buy_if_not_in_position: true
 
-  cooldown_minutes: 30
-  max_spread_pct: 0.25
+  cooldown_minutes: 45
+  max_spread_pct: 0.40
   eur_reserve: 50
-
   skip_log_every_seconds: 600
 
 fees:
