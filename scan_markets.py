@@ -1,0 +1,157 @@
+import math, time
+import pandas as pd
+import ccxt
+
+# ===== SETTINGS (match your bot) =====
+TIMEFRAME = "15m"
+CANDLES_LIMIT = 900
+MIN_TRADES = 10
+SLEEP = 0.15
+
+SMA_FAST = 20
+SMA_SLOW = 60
+RSI_LEN = 14
+RSI_BUY_MIN = 55
+
+ATR_LEN = 14
+ATR_TP_MULT = 2.2
+ATR_SL_MULT = 1.8
+EXIT_ON_TREND_BREAK = True
+
+USE_ATR_FILTER = True
+MIN_ATR_PCT = 0.30
+
+STAKE_QUOTE = 15.0
+COOLDOWN_MINUTES = 45
+TAKER_FEE_PCT = 0.25
+SLIPPAGE_PCT = 0.00
+# ====================================
+
+def sma(s, n): return s.rolling(n).mean()
+
+def rsi(s, n=14):
+    d = s.diff()
+    up = d.clip(lower=0)
+    dn = -d.clip(upper=0)
+    ru = up.rolling(n).mean()
+    rd = dn.rolling(n).mean()
+    rs = ru / (rd.replace(0, 1e-12))
+    return 100 - (100/(1+rs))
+
+def atr(df, n=14):
+    h,l,c = df["high"], df["low"], df["close"]
+    pc = c.shift(1)
+    tr = pd.concat([(h-l).abs(), (h-pc).abs(), (l-pc).abs()], axis=1).max(axis=1)
+    return tr.rolling(n).mean()
+
+def backtest(df: pd.DataFrame):
+    df = df.copy()
+    df["sma_fast"] = sma(df["close"], SMA_FAST)
+    df["sma_slow"] = sma(df["close"], SMA_SLOW)
+    df["rsi"] = rsi(df["close"], RSI_LEN)
+    df["atr"] = atr(df, ATR_LEN)
+
+    warmup = max(SMA_SLOW, RSI_LEN, ATR_LEN) + 2
+    if len(df) <= warmup:
+        return None
+
+    in_pos = False
+    base_amt = entry_price = entry_cost = entry_fee = 0.0
+    cooldown_until = 0
+
+    sells = wins = 0
+    pnl_sum = 0.0
+    pnls = []
+
+    for i in range(warmup, len(df)):
+        p = float(df["close"].iloc[i])
+        if p <= 0: 
+            continue
+
+        t_min = i * 15  # timeframe=15m proxy
+        if t_min < cooldown_until:
+            continue
+
+        sma_f = float(df["sma_fast"].iloc[i])
+        sma_s = float(df["sma_slow"].iloc[i])
+        trend_up = sma_f > sma_s
+        trend_break = sma_f < sma_s
+
+        rsi_v = float(df["rsi"].iloc[i]) if not math.isnan(float(df["rsi"].iloc[i])) else 50.0
+        atr_v = float(df["atr"].iloc[i]) if not math.isnan(float(df["atr"].iloc[i])) else 0.0
+        atr_pct = (atr_v / p * 100.0) if p > 0 else 0.0
+        atr_ok = (atr_pct >= MIN_ATR_PCT) if USE_ATR_FILTER else True
+
+        if in_pos:
+            if atr_v <= 0:
+                atr_v = max(entry_price * 0.002, 0.01)
+            tp = entry_price + ATR_TP_MULT * atr_v
+            sl = entry_price - ATR_SL_MULT * atr_v
+            do_sell = (p >= tp) or (p <= sl) or (EXIT_ON_TREND_BREAK and trend_break)
+            if do_sell:
+                sell_p = p * (1 - SLIPPAGE_PCT/100.0)
+                proceeds = base_amt * sell_p
+                sell_fee = proceeds * (TAKER_FEE_PCT/100.0)
+                net = (proceeds - entry_cost) - (entry_fee + sell_fee)
+                pnls.append(net); pnl_sum += net
+                sells += 1
+                if net > 0: wins += 1
+                in_pos = False
+                base_amt = entry_price = entry_cost = entry_fee = 0.0
+                cooldown_until = t_min + COOLDOWN_MINUTES
+            continue
+
+        if (not in_pos) and trend_up and (rsi_v >= RSI_BUY_MIN) and atr_ok:
+            buy_p = p * (1 + SLIPPAGE_PCT/100.0)
+            base_amt = STAKE_QUOTE / buy_p
+            entry_price = buy_p
+            entry_cost = STAKE_QUOTE
+            entry_fee = entry_cost * (TAKER_FEE_PCT/100.0)
+            in_pos = True
+            cooldown_until = t_min + COOLDOWN_MINUTES
+
+    if sells == 0:
+        return {"sells":0,"winrate":0.0,"pnl":0.0,"profit_factor":0.0}
+
+    sr = pd.Series(pnls)
+    gw = float(sr[sr>0].sum()) if (sr>0).any() else 0.0
+    gl = float(-sr[sr<0].sum()) if (sr<0).any() else 0.0
+    pf = (gw/gl) if gl>0 else (999.0 if gw>0 else 0.0)
+
+    return {"sells":sells,"winrate":wins/sells*100.0,"pnl":pnl_sum,"profit_factor":pf}
+
+ex = ccxt.bitvavo({"enableRateLimit": True})
+mkts = ex.load_markets()
+
+pairs = sorted([sym for sym,m in mkts.items() if m.get("active",True) and sym.endswith("/EUR")])
+
+rows = []
+for market in pairs:
+    try:
+        ohlcv = ex.fetch_ohlcv(market, timeframe=TIMEFRAME, limit=CANDLES_LIMIT)
+        if not ohlcv or len(ohlcv) < 80:
+            continue
+        df = pd.DataFrame(ohlcv, columns=["ts","open","high","low","close","volume"])
+        res = backtest(df)
+        if not res: 
+            continue
+        res["market"] = market
+        rows.append(res)
+    except Exception:
+        pass
+    time.sleep(SLEEP)
+
+out = pd.DataFrame(rows)
+if out.empty:
+    print("No results.")
+    raise SystemExit(0)
+
+rank = out[out["sells"] >= MIN_TRADES].copy()
+rank = rank.sort_values(["winrate","pnl"], ascending=[False, False])
+
+print("\nTOP by WINRATE (min trades =", MIN_TRADES, ")")
+print(rank.head(20)[["market","sells","winrate","pnl","profit_factor"]].to_string(index=False))
+
+best_pnl = out[out["sells"] >= MIN_TRADES].sort_values("pnl", ascending=False).head(20)
+print("\nTOP by PnL (min trades =", MIN_TRADES, ")")
+print(best_pnl[["market","sells","winrate","pnl","profit_factor"]].to_string(index=False))
