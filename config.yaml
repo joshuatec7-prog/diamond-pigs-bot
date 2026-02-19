@@ -1,7 +1,5 @@
-# COPY/PASTE into config.yaml (KITE, €50 per trade)
-
 quote: EUR
-symbols: [KITE]
+symbols: [KITE, SOL]
 timeframe: "15m"
 
 signals:
@@ -27,7 +25,7 @@ risk:
   dry_run: false
 
   fixed_stake_quote: 50
-  max_open_positions: 1
+  max_open_positions: 2
   only_buy_if_not_in_position: true
 
   cooldown_minutes: 45
