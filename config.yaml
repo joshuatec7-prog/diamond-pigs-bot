@@ -1,5 +1,5 @@
 quote: EUR
-symbols: [U, AIXBT, NEWT]
+symbols: [SOL, ETH, TRB]
 timeframe: "15m"
 
 signals:
@@ -25,11 +25,11 @@ risk:
   dry_run: false
 
   fixed_stake_quote: 30
-  max_open_positions: 3
+  max_open_positions: 2
   only_buy_if_not_in_position: true
 
   cooldown_minutes: 45
-  max_spread_pct: 0.50
+  max_spread_pct: 0.35
   eur_reserve: 50
   skip_log_every_seconds: 600
 
