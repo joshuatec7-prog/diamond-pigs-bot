@@ -16,7 +16,7 @@ signals:
   atr_tp_mult: 2.2
   atr_sl_mult: 1.8
 
-  exit_on_trend_break: WAAR
+  exit_on_trend_break: true
 
   use_atr_filter: true
   min_atr_pct: 0.30
