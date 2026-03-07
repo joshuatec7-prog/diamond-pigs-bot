@@ -23,20 +23,18 @@ signals:
 
 risk:
   dry_run: false
-
   fixed_stake_quote: 30
   max_open_positions: 2
   only_buy_if_not_in_position: true
-
   cooldown_minutes: 45
   max_spread_pct: 0.35
   eur_reserve: 50
-  skip_log_every_seconds: 600
+  skip_log_every_seconds: 900
 
 fees:
   taker_fee_pct: 0.25
 
 logging:
   level: INFO
-  loop_sleep_seconds: 30
+  loop_sleep_seconds: 60
   candles_limit: 400
