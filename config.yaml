@@ -1,5 +1,5 @@
 quote: EUR
-symbols: [SOL, ETH, TRB]
+symbols: [SOL]
 timeframe: "15m"
 
 signals:
@@ -9,7 +9,7 @@ signals:
 
   use_rsi: true
   rsi_len: 14
-  rsi_buy_min: 55
+  rsi_buy_min: 58
 
   use_atr: true
   atr_len: 14
@@ -24,7 +24,7 @@ signals:
 risk:
   dry_run: false
   fixed_stake_quote: 30
-  max_open_positions: 2
+  max_open_positions: 1
   only_buy_if_not_in_position: true
   cooldown_minutes: 45
   max_spread_pct: 0.35
