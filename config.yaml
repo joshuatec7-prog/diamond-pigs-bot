@@ -1,6 +1,14 @@
 quote: EUR
-symbols: [SOL]
-timeframe: "15m"
+timeframe: 15m
+
+scanner:
+  auto_scan: true
+  top_n_markets: 25
+  min_quote_volume: 250000
+  exclude_bases:
+    - EUR
+    - USDT
+    - USDC
 
 signals:
   use_sma: true
@@ -9,27 +17,28 @@ signals:
 
   use_rsi: true
   rsi_len: 14
-  rsi_buy_min: 58
+  rsi_buy_min: 55
+  rsi_buy_max: 72
 
   use_atr: true
   atr_len: 14
-  atr_tp_mult: 2.2
+  atr_tp_mult: 2.0
   atr_sl_mult: 1.8
 
   exit_on_trend_break: true
 
   use_atr_filter: true
-  min_atr_pct: 0.30
+  min_atr_pct: 0.35
 
 risk:
-  dry_run: false
   fixed_stake_quote: 30
-  max_open_positions: 1
+  max_open_positions: 5
   only_buy_if_not_in_position: true
   cooldown_minutes: 45
   max_spread_pct: 0.35
   eur_reserve: 50
-  skip_log_every_seconds: 900
+  dry_run: true
+  skip_log_every_seconds: 600
 
 fees:
   taker_fee_pct: 0.25
@@ -37,4 +46,7 @@ fees:
 logging:
   level: INFO
   loop_sleep_seconds: 60
-  candles_limit: 400
+  candles_limit: 250
+
+alerts:
+  email_enabled: true
