@@ -1,35 +1,27 @@
 #!/usr/bin/env python3
-# Diamond-Pigs Trend v2.1 (EN) - Bitvavo via ccxt
+# Diamond-Pigs AutoScan v3.0 - Bitvavo via ccxt
 #
-# Complete paste-ready version:
-# - STRICT English config schema (unknown keys => bot stops)
-# - Accepts booleans: WAAR/waar/true/yes/ja/1/on/aan
-# - Accepts comma decimals "0,12" and dot decimals "0.12"
-# - NEVER sells existing/manual coins:
-#     -> only sells positions recorded by this bot in state.json (opened_by_bot=true)
-# - DRY_RUN mode (safe testing, no real orders)
-# - Uses real fees from ccxt order when available, else estimates taker_fee_pct
-# - Compact skip logging with rate limiting
-# - Safer balance refresh after BUY/SELL
-# - FIXED: cooldown blocks BUY only, never SELL
-# - FIXED: open_positions recalculated correctly during the loop
+# Functies:
+# - Automatische scan van EUR-markten op Bitvavo
+# - Selecteert kansrijke coins op volume + spread + trend + RSI + ATR
+# - Kan meerdere coins tegelijk openen
+# - Verkoopt alleen posities die deze bot zelf heeft geopend
+# - E-mail alerts
+# - DRY_RUN veilig testen
 #
 # Requirements: ccxt, pandas, pyyaml, python-dotenv
-# Env:
-#   BITVAVO_API_KEY, BITVAVO_API_SECRET
-#   (optional) BITVAVO_OPERATOR_ID
-# Optional:
-#   CFG_FILE=/opt/render/project/src/config.yaml
-#   STATE_FILE=/opt/render/project/src/state.json
 
 import os
 import time
 import json
 import math
 import logging
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Tuple, List
 
 import pandas as pd
 import yaml
@@ -38,10 +30,12 @@ import ccxt
 
 LOG = logging.getLogger("diamond")
 
+
 # ------------------ Helpers ------------------
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
 
 def to_bool(v, default=False) -> bool:
     if isinstance(v, bool):
@@ -55,6 +49,7 @@ def to_bool(v, default=False) -> bool:
         return s in ("true", "waar", "yes", "ja", "1", "on", "aan", "y")
     return default
 
+
 def to_float(v, default=0.0) -> float:
     if v is None:
         return default
@@ -67,6 +62,7 @@ def to_float(v, default=0.0) -> float:
         except ValueError:
             return default
     return default
+
 
 def to_int(v, default=0) -> int:
     if v is None:
@@ -83,13 +79,16 @@ def to_int(v, default=0) -> int:
             return default
     return default
 
+
 def fmt_eur(x: float) -> str:
     return f"{x:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
 
 # ------------------ Indicators ------------------
 
 def sma(series: pd.Series, length: int) -> pd.Series:
     return series.rolling(length).mean()
+
 
 def rsi(series: pd.Series, length: int = 14) -> pd.Series:
     delta = series.diff()
@@ -99,6 +98,7 @@ def rsi(series: pd.Series, length: int = 14) -> pd.Series:
     roll_down = down.rolling(length).mean()
     rs = roll_up / (roll_down.replace(0, 1e-12))
     return 100 - (100 / (1 + rs))
+
 
 def atr(df: pd.DataFrame, length: int = 14) -> pd.Series:
     high = df["high"]
@@ -111,12 +111,14 @@ def atr(df: pd.DataFrame, length: int = 14) -> pd.Series:
     ).max(axis=1)
     return tr.rolling(length).mean()
 
+
 # ------------------ Files ------------------
 
 ROOT = Path(__file__).parent
 CFG_FILE = Path(os.getenv("CFG_FILE", str(ROOT / "config.yaml")))
 STATE_FILE = Path(os.getenv("STATE_FILE", str(ROOT / "state.json")))
 TX_CSV = ROOT / "transactions.csv"
+
 
 def setup_logging(level: str):
     level = (level or "INFO").upper()
@@ -126,12 +128,45 @@ def setup_logging(level: str):
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-# ------------------ Config (STRICT) ------------------
 
-ALLOWED_TOP_KEYS = {"quote", "symbols", "timeframe", "signals", "risk", "fees", "logging"}
+# ------------------ Alerts ------------------
+
+def send_email_alert(subject: str, message: str):
+    enabled = to_bool(os.getenv("EMAIL_ENABLED", "true"), True)
+    if not enabled:
+        return
+
+    email_to = os.getenv("ALERT_EMAIL_TO", "").strip()
+    email_from = os.getenv("ALERT_EMAIL_FROM", "").strip()
+    email_password = os.getenv("ALERT_EMAIL_PASSWORD", "").strip()
+
+    if not email_to or not email_from or not email_password:
+        LOG.info(f"E-mail niet ingesteld: {subject}")
+        return
+
+    try:
+        msg = MIMEMultipart()
+        msg["From"] = email_from
+        msg["To"] = email_to
+        msg["Subject"] = subject
+        msg.attach(MIMEText(message, "plain", "utf-8"))
+
+        server = smtplib.SMTP("smtp.gmail.com", 587, timeout=20)
+        server.starttls()
+        server.login(email_from, email_password)
+        server.sendmail(email_from, email_to, msg.as_string())
+        server.quit()
+    except Exception as e:
+        LOG.warning(f"E-mail fout: {e}")
+
+
+# ------------------ Config ------------------
+
+ALLOWED_TOP_KEYS = {"quote", "timeframe", "scanner", "signals", "risk", "fees", "logging", "alerts"}
+ALLOWED_SCANNER_KEYS = {"auto_scan", "top_n_markets", "min_quote_volume", "exclude_bases"}
 ALLOWED_SIGNALS_KEYS = {
     "use_sma", "sma_fast", "sma_slow",
-    "use_rsi", "rsi_len", "rsi_buy_min",
+    "use_rsi", "rsi_len", "rsi_buy_min", "rsi_buy_max",
     "use_atr", "atr_len", "atr_tp_mult", "atr_sl_mult",
     "exit_on_trend_break",
     "use_atr_filter", "min_atr_pct",
@@ -139,11 +174,12 @@ ALLOWED_SIGNALS_KEYS = {
 ALLOWED_RISK_KEYS = {
     "fixed_stake_quote", "max_open_positions", "only_buy_if_not_in_position",
     "cooldown_minutes", "max_spread_pct", "eur_reserve",
-    "dry_run",
-    "skip_log_every_seconds",
+    "dry_run", "skip_log_every_seconds",
 }
 ALLOWED_FEES_KEYS = {"taker_fee_pct"}
 ALLOWED_LOG_KEYS = {"level", "loop_sleep_seconds", "candles_limit"}
+ALLOWED_ALERTS_KEYS = {"email_enabled"}
+
 
 def _assert_no_unknown(section: str, data: Any, allowed: set):
     if not isinstance(data, dict):
@@ -152,37 +188,29 @@ def _assert_no_unknown(section: str, data: Any, allowed: set):
     if unknown:
         raise ValueError(f"Config error: unknown keys in '{section}': {sorted(unknown)}")
 
-def validate_cfg(cfg: Dict[str, Any]):
-    sig = cfg["signals"]
-    rk = cfg["risk"]
-    lg = cfg["logging"]
 
+def validate_cfg(cfg: Dict[str, Any]):
     if not cfg["quote"]:
         raise ValueError("Config error: quote may not be empty.")
-    if not cfg["symbols"]:
-        raise ValueError("Config error: symbols may not be empty.")
-    if sig["sma_fast"] <= 0 or sig["sma_slow"] <= 0:
+    if cfg["scanner"]["top_n_markets"] <= 0:
+        raise ValueError("Config error: top_n_markets must be > 0.")
+    if cfg["scanner"]["min_quote_volume"] < 0:
+        raise ValueError("Config error: min_quote_volume must be >= 0.")
+    if cfg["signals"]["sma_fast"] <= 0 or cfg["signals"]["sma_slow"] <= 0:
         raise ValueError("Config error: SMA lengths must be > 0.")
-    if sig["use_sma"] and sig["sma_fast"] >= sig["sma_slow"]:
+    if cfg["signals"]["use_sma"] and cfg["signals"]["sma_fast"] >= cfg["signals"]["sma_slow"]:
         raise ValueError("Config error: sma_fast must be smaller than sma_slow.")
-    if sig["rsi_len"] <= 0:
-        raise ValueError("Config error: rsi_len must be > 0.")
-    if sig["atr_len"] <= 0:
-        raise ValueError("Config error: atr_len must be > 0.")
-    if rk["fixed_stake_quote"] <= 0:
+    if cfg["risk"]["fixed_stake_quote"] <= 0:
         raise ValueError("Config error: fixed_stake_quote must be > 0.")
-    if rk["max_open_positions"] <= 0:
+    if cfg["risk"]["max_open_positions"] <= 0:
         raise ValueError("Config error: max_open_positions must be > 0.")
-    if rk["cooldown_minutes"] < 0:
-        raise ValueError("Config error: cooldown_minutes must be >= 0.")
-    if rk["eur_reserve"] < 0:
-        raise ValueError("Config error: eur_reserve must be >= 0.")
-    if rk["max_spread_pct"] <= 0:
+    if cfg["risk"]["max_spread_pct"] <= 0:
         raise ValueError("Config error: max_spread_pct must be > 0.")
-    if lg["loop_sleep_seconds"] <= 0:
+    if cfg["logging"]["loop_sleep_seconds"] <= 0:
         raise ValueError("Config error: loop_sleep_seconds must be > 0.")
-    if lg["candles_limit"] < 100:
+    if cfg["logging"]["candles_limit"] < 100:
         raise ValueError("Config error: candles_limit must be >= 100.")
+
 
 def load_cfg() -> Dict[str, Any]:
     if not CFG_FILE.exists():
@@ -190,114 +218,115 @@ def load_cfg() -> Dict[str, Any]:
 
     raw = yaml.safe_load(CFG_FILE.read_text(encoding="utf-8")) or {}
     if not isinstance(raw, dict):
-        raise ValueError("Config must be a YAML mapping (top-level dict).")
+        raise ValueError("Config must be a YAML mapping.")
 
     _assert_no_unknown("root", raw, ALLOWED_TOP_KEYS)
 
     cfg = dict(raw)
     cfg.setdefault("quote", "EUR")
-    cfg.setdefault("symbols", ["BTC", "ETH"])
     cfg.setdefault("timeframe", "15m")
+    cfg.setdefault("scanner", {})
     cfg.setdefault("signals", {})
     cfg.setdefault("risk", {})
     cfg.setdefault("fees", {})
     cfg.setdefault("logging", {})
+    cfg.setdefault("alerts", {})
 
+    sc = cfg["scanner"]
     sig = cfg["signals"]
     rk = cfg["risk"]
     fees = cfg["fees"]
     lg = cfg["logging"]
+    al = cfg["alerts"]
 
+    _assert_no_unknown("scanner", sc, ALLOWED_SCANNER_KEYS)
     _assert_no_unknown("signals", sig, ALLOWED_SIGNALS_KEYS)
     _assert_no_unknown("risk", rk, ALLOWED_RISK_KEYS)
     _assert_no_unknown("fees", fees, ALLOWED_FEES_KEYS)
     _assert_no_unknown("logging", lg, ALLOWED_LOG_KEYS)
+    _assert_no_unknown("alerts", al, ALLOWED_ALERTS_KEYS)
 
-    # defaults: signals
+    sc.setdefault("auto_scan", True)
+    sc.setdefault("top_n_markets", 25)
+    sc.setdefault("min_quote_volume", 250000)
+    sc.setdefault("exclude_bases", ["EUR", "USDT", "USDC"])
+
     sig.setdefault("use_sma", True)
     sig.setdefault("sma_fast", 20)
     sig.setdefault("sma_slow", 60)
-
     sig.setdefault("use_rsi", True)
     sig.setdefault("rsi_len", 14)
     sig.setdefault("rsi_buy_min", 55)
-
+    sig.setdefault("rsi_buy_max", 72)
     sig.setdefault("use_atr", True)
     sig.setdefault("atr_len", 14)
     sig.setdefault("atr_tp_mult", 2.0)
     sig.setdefault("atr_sl_mult", 1.8)
-
     sig.setdefault("exit_on_trend_break", True)
+    sig.setdefault("use_atr_filter", True)
+    sig.setdefault("min_atr_pct", 0.35)
 
-    sig.setdefault("use_atr_filter", False)
-    sig.setdefault("min_atr_pct", 0.25)
-
-    # defaults: risk
-    rk.setdefault("fixed_stake_quote", 15.0)
-    rk.setdefault("max_open_positions", 2)
+    rk.setdefault("fixed_stake_quote", 30.0)
+    rk.setdefault("max_open_positions", 5)
     rk.setdefault("only_buy_if_not_in_position", True)
-    rk.setdefault("cooldown_minutes", 30)
-    rk.setdefault("max_spread_pct", 0.25)
+    rk.setdefault("cooldown_minutes", 45)
+    rk.setdefault("max_spread_pct", 0.35)
     rk.setdefault("eur_reserve", 50.0)
-    rk.setdefault("dry_run", False)
+    rk.setdefault("dry_run", True)
     rk.setdefault("skip_log_every_seconds", 600)
 
-    # defaults: fees
     fees.setdefault("taker_fee_pct", 0.25)
 
-    # defaults: logging
     lg.setdefault("level", "INFO")
-    lg.setdefault("loop_sleep_seconds", 30)
-    lg.setdefault("candles_limit", 400)
+    lg.setdefault("loop_sleep_seconds", 60)
+    lg.setdefault("candles_limit", 250)
 
-    # coerce types
+    al.setdefault("email_enabled", True)
+
     cfg["quote"] = str(cfg["quote"]).upper().strip()
-
-    symbols = []
-    for s in list(cfg["symbols"]):
-        x = str(s).upper().strip()
-        if x and x not in symbols:
-            symbols.append(x)
-    cfg["symbols"] = symbols
-
     cfg["timeframe"] = str(cfg["timeframe"]).strip()
+
+    sc["auto_scan"] = to_bool(sc.get("auto_scan"), True)
+    sc["top_n_markets"] = to_int(sc.get("top_n_markets"), 25)
+    sc["min_quote_volume"] = to_float(sc.get("min_quote_volume"), 250000)
+    sc["exclude_bases"] = [str(x).upper().strip() for x in sc.get("exclude_bases", []) if str(x).strip()]
 
     sig["use_sma"] = to_bool(sig.get("use_sma"), True)
     sig["sma_fast"] = to_int(sig.get("sma_fast"), 20)
     sig["sma_slow"] = to_int(sig.get("sma_slow"), 60)
-
     sig["use_rsi"] = to_bool(sig.get("use_rsi"), True)
     sig["rsi_len"] = to_int(sig.get("rsi_len"), 14)
     sig["rsi_buy_min"] = to_float(sig.get("rsi_buy_min"), 55)
-
+    sig["rsi_buy_max"] = to_float(sig.get("rsi_buy_max"), 72)
     sig["use_atr"] = to_bool(sig.get("use_atr"), True)
     sig["atr_len"] = to_int(sig.get("atr_len"), 14)
     sig["atr_tp_mult"] = to_float(sig.get("atr_tp_mult"), 2.0)
     sig["atr_sl_mult"] = to_float(sig.get("atr_sl_mult"), 1.8)
-
     sig["exit_on_trend_break"] = to_bool(sig.get("exit_on_trend_break"), True)
+    sig["use_atr_filter"] = to_bool(sig.get("use_atr_filter"), True)
+    sig["min_atr_pct"] = to_float(sig.get("min_atr_pct"), 0.35)
 
-    sig["use_atr_filter"] = to_bool(sig.get("use_atr_filter"), False)
-    sig["min_atr_pct"] = to_float(sig.get("min_atr_pct"), 0.25)
-
-    rk["fixed_stake_quote"] = to_float(rk.get("fixed_stake_quote"), 15.0)
-    rk["max_open_positions"] = to_int(rk.get("max_open_positions"), 2)
+    rk["fixed_stake_quote"] = to_float(rk.get("fixed_stake_quote"), 30.0)
+    rk["max_open_positions"] = to_int(rk.get("max_open_positions"), 5)
     rk["only_buy_if_not_in_position"] = to_bool(rk.get("only_buy_if_not_in_position"), True)
-    rk["cooldown_minutes"] = to_int(rk.get("cooldown_minutes"), 30)
-    rk["max_spread_pct"] = to_float(rk.get("max_spread_pct"), 0.25)
+    rk["cooldown_minutes"] = to_int(rk.get("cooldown_minutes"), 45)
+    rk["max_spread_pct"] = to_float(rk.get("max_spread_pct"), 0.35)
     rk["eur_reserve"] = to_float(rk.get("eur_reserve"), 50.0)
-    rk["dry_run"] = to_bool(rk.get("dry_run"), False)
+    rk["dry_run"] = to_bool(rk.get("dry_run"), True)
     rk["skip_log_every_seconds"] = max(10, to_int(rk.get("skip_log_every_seconds"), 600))
 
     fees["taker_fee_pct"] = to_float(fees.get("taker_fee_pct"), 0.25)
 
     lg["level"] = str(lg.get("level", "INFO")).upper()
-    lg["loop_sleep_seconds"] = to_int(lg.get("loop_sleep_seconds"), 30)
-    lg["candles_limit"] = to_int(lg.get("candles_limit"), 400)
+    lg["loop_sleep_seconds"] = to_int(lg.get("loop_sleep_seconds"), 60)
+    lg["candles_limit"] = to_int(lg.get("candles_limit"), 250)
+
+    al["email_enabled"] = to_bool(al.get("email_enabled"), True)
 
     validate_cfg(cfg)
     cfg["_cfg_path"] = str(CFG_FILE)
     return cfg
+
 
 # ------------------ State & CSV ------------------
 
@@ -316,18 +345,22 @@ def load_state() -> Dict[str, Any]:
             pass
     return {"positions": {}, "cooldown": {}, "pnl_quote": 0.0, "trades": 0, "wins": 0}
 
+
 def save_state(state: Dict[str, Any]):
     STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+
 
 def ensure_csv_header():
     if TX_CSV.exists():
         return
-    cols = ["ts","market","side","price","base_amount","fees_quote","spread_pct","net_pnl_quote","holding_time_min","reason","dry_run"]
+    cols = ["ts", "market", "side", "price", "base_amount", "fees_quote", "spread_pct", "net_pnl_quote", "holding_time_min", "reason", "dry_run"]
     pd.DataFrame([], columns=cols).to_csv(TX_CSV, index=False)
+
 
 def append_tx(row: Dict[str, Any]):
     ensure_csv_header()
     pd.DataFrame([row]).to_csv(TX_CSV, index=False, mode="a", header=False)
+
 
 # ------------------ Exchange ------------------
 
@@ -342,16 +375,8 @@ def make_exchange():
         "secret": api_secret,
         "enableRateLimit": True,
     })
-
-    opid = os.getenv("BITVAVO_OPERATOR_ID", "").strip()
-    if opid:
-        try:
-            ex.options = ex.options or {}
-            ex.options["operatorId"] = int(opid)
-        except Exception:
-            LOG.warning("BITVAVO_OPERATOR_ID ignored (must be integer).")
-
     return ex
+
 
 def safe_fetch_balance(ex, retries=5, base_sleep=1.0):
     last_err = None
@@ -365,19 +390,19 @@ def safe_fetch_balance(ex, retries=5, base_sleep=1.0):
             time.sleep(sleep_s)
     raise RuntimeError(f"Fetch balance failed after {retries} attempts: {last_err}")
 
+
 def get_free_quote(balance: Dict[str, Any], quote: str) -> float:
     try:
         return float((balance.get("free", {}) or {}).get(quote, 0.0) or 0.0)
     except Exception:
         return 0.0
 
-# ------------------ Market helpers ------------------
 
-def market_symbol(base: str, quote: str) -> str:
-    return f"{base}/{quote}"
+# ------------------ Market helpers ------------------
 
 def fetch_ticker(ex, market: str) -> Dict[str, Any]:
     return ex.fetch_ticker(market)
+
 
 def calc_spread_pct(ticker: Dict[str, Any]) -> float:
     bid = ticker.get("bid")
@@ -386,16 +411,18 @@ def calc_spread_pct(ticker: Dict[str, Any]) -> float:
         return 999.0
     return (ask - bid) / ask * 100.0
 
+
 def fetch_candles(ex, market: str, timeframe: str, limit: int) -> pd.DataFrame:
     ohlcv = ex.fetch_ohlcv(market, timeframe=timeframe, limit=limit)
     if not ohlcv or len(ohlcv) < 50:
         raise RuntimeError("Not enough candle data.")
-    df = pd.DataFrame(ohlcv, columns=["ts","open","high","low","close","volume"])
+    df = pd.DataFrame(ohlcv, columns=["ts", "open", "high", "low", "close", "volume"])
     df["ts"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
     df = df.sort_values("ts").drop_duplicates(subset=["ts"], keep="last").reset_index(drop=True)
     if len(df) < 50:
         raise RuntimeError("Not enough clean candle data.")
     return df
+
 
 def amount_to_precision_safe(ex, market: str, amount: float) -> float:
     try:
@@ -403,11 +430,13 @@ def amount_to_precision_safe(ex, market: str, amount: float) -> float:
     except Exception:
         return float(amount)
 
+
 def market_limits(ex, market: str) -> Tuple[float, float]:
     mk = ex.market(market)
     min_amount = float((mk.get("limits", {}) or {}).get("amount", {}).get("min", 0) or 0)
     min_cost = float((mk.get("limits", {}) or {}).get("cost", {}).get("min", 0) or 0)
     return min_amount, min_cost
+
 
 def fee_from_order_or_estimate(order: Dict[str, Any], fallback_quote_amount: float, taker_fee_pct: float) -> float:
     try:
@@ -425,6 +454,41 @@ def fee_from_order_or_estimate(order: Dict[str, Any], fallback_quote_amount: flo
     except Exception:
         pass
     return float(fallback_quote_amount) * (float(taker_fee_pct) / 100.0)
+
+
+def get_scan_markets(ex, cfg: Dict[str, Any]) -> List[str]:
+    quote = cfg["quote"]
+    sc = cfg["scanner"]
+    exclude = set(sc["exclude_bases"])
+    min_vol = float(sc["min_quote_volume"])
+    top_n = int(sc["top_n_markets"])
+
+    markets = []
+    for market, mk in ex.markets.items():
+        try:
+            if not mk.get("active", True):
+                continue
+            if mk.get("quote") != quote:
+                continue
+            base = str(mk.get("base", "")).upper()
+            if not base or base in exclude:
+                continue
+            ticker = fetch_ticker(ex, market)
+            quote_volume = float(ticker.get("quoteVolume") or 0.0)
+            if quote_volume < min_vol:
+                continue
+            spread_pct = calc_spread_pct(ticker)
+            markets.append({
+                "market": market,
+                "quote_volume": quote_volume,
+                "spread_pct": spread_pct,
+            })
+        except Exception:
+            continue
+
+    markets = sorted(markets, key=lambda x: x["quote_volume"], reverse=True)
+    return [x["market"] for x in markets[:top_n]]
+
 
 # ------------------ Signals ------------------
 
@@ -450,6 +514,7 @@ def compute_signal(df: pd.DataFrame, cfg: Dict[str, Any]) -> Dict[str, Any]:
         df["atr"] = 0.0
 
     last = df.iloc[-1]
+    prev = df.iloc[-2]
     last_close = float(last["close"])
 
     trend_up = True
@@ -459,13 +524,17 @@ def compute_signal(df: pd.DataFrame, cfg: Dict[str, Any]) -> Dict[str, Any]:
         trend_break = (last["sma_fast"] < last["sma_slow"])
 
     rsi_val = float(last["rsi"]) if sig["use_rsi"] and not math.isnan(float(last["rsi"])) else 50.0
-    rsi_ok = (rsi_val >= sig["rsi_buy_min"]) if sig["use_rsi"] else True
+    rsi_ok = True
+    if sig["use_rsi"]:
+        rsi_ok = (rsi_val >= sig["rsi_buy_min"]) and (rsi_val <= sig["rsi_buy_max"])
 
     atr_val = float(last.get("atr", 0.0)) if not math.isnan(float(last.get("atr", 0.0))) else 0.0
     atr_pct = (atr_val / last_close * 100.0) if last_close > 0 else 0.0
     atr_filter_ok = True
     if sig["use_atr_filter"]:
-        atr_filter_ok = (atr_pct >= sig["min_atr_pct"])
+        atr_filter_ok = atr_pct >= sig["min_atr_pct"]
+
+    momentum_up = last_close > float(prev["close"])
 
     return {
         "trend_up": bool(trend_up),
@@ -476,19 +545,39 @@ def compute_signal(df: pd.DataFrame, cfg: Dict[str, Any]) -> Dict[str, Any]:
         "atr_pct": float(atr_pct),
         "atr_filter_ok": bool(atr_filter_ok),
         "last_close": float(last_close),
+        "momentum_up": bool(momentum_up),
     }
 
+
+def candidate_score(signal: Dict[str, Any], spread_pct: float) -> float:
+    score = 0.0
+    if signal["trend_up"]:
+        score += 40
+    if signal["rsi_ok"]:
+        score += 20
+    if signal["momentum_up"]:
+        score += 10
+    if signal["atr_filter_ok"]:
+        score += 10
+    if spread_pct < 0.20:
+        score += 10
+    elif spread_pct < 0.35:
+        score += 5
+    score += min(signal["atr_pct"], 5.0) * 2
+    return round(score, 2)
+
+
 def should_buy(signal: Dict[str, Any], in_position: bool, cfg: Dict[str, Any]) -> Tuple[bool, str]:
-    sig = cfg["signals"]
     if in_position:
         return False, "Already in position"
-    if sig["use_sma"] and not signal["trend_up"]:
+    if cfg["signals"]["use_sma"] and not signal["trend_up"]:
         return False, "SKIP no uptrend"
-    if sig["use_rsi"] and not signal["rsi_ok"]:
-        return False, f"SKIP RSI {signal['rsi']:.1f} < {sig['rsi_buy_min']}"
-    if sig["use_atr_filter"] and not signal["atr_filter_ok"]:
-        return False, f"SKIP ATR% {signal['atr_pct']:.3f} < {sig['min_atr_pct']}"
+    if cfg["signals"]["use_rsi"] and not signal["rsi_ok"]:
+        return False, f"SKIP RSI {signal['rsi']:.1f} outside range"
+    if cfg["signals"]["use_atr_filter"] and not signal["atr_filter_ok"]:
+        return False, f"SKIP ATR% {signal['atr_pct']:.3f} too low"
     return True, "BUY signal"
+
 
 def should_sell(signal: Dict[str, Any], pos: Dict[str, Any], cfg: Dict[str, Any], last_price: float) -> Tuple[bool, str, float, float]:
     sig = cfg["signals"]
@@ -509,7 +598,8 @@ def should_sell(signal: Dict[str, Any], pos: Dict[str, Any], cfg: Dict[str, Any]
         return True, "SELL TREND_BREAK", tp, sl
     return False, "HOLD", tp, sl
 
-# ------------------ Orders (DRY_RUN) ------------------
+
+# ------------------ Orders ------------------
 
 def place_market_buy(ex, market: str, stake_quote: float, taker_fee_pct: float, dry_run: bool):
     ticker = fetch_ticker(ex, market)
@@ -547,6 +637,7 @@ def place_market_buy(ex, market: str, stake_quote: float, taker_fee_pct: float, 
     fee_q = fee_from_order_or_estimate(order, cost, taker_fee_pct)
     return order, filled, avg, cost, fee_q, ticker
 
+
 def place_market_sell(ex, market: str, base_amount: float, taker_fee_pct: float, dry_run: bool):
     ticker = fetch_ticker(ex, market)
     bid = float(ticker.get("bid") or 0.0)
@@ -576,9 +667,11 @@ def place_market_sell(ex, market: str, base_amount: float, taker_fee_pct: float,
     fee_q = fee_from_order_or_estimate(order, proceeds, taker_fee_pct)
     return order, filled, avg, proceeds, fee_q, ticker
 
+
 # ------------------ Skip logging rate limiter ------------------
 
 _skip_last: Dict[str, float] = {}
+
 
 def log_skip(market: str, msg: str, every_s: int):
     key = f"{market}:{msg}"
@@ -588,6 +681,7 @@ def log_skip(market: str, msg: str, every_s: int):
         _skip_last[key] = now
         LOG.info(f"{market} {msg}")
 
+
 # ------------------ Main ------------------
 
 def main():
@@ -596,11 +690,11 @@ def main():
     cfg = load_cfg()
     setup_logging(cfg["logging"]["level"])
 
+    os.environ["EMAIL_ENABLED"] = "true" if cfg["alerts"]["email_enabled"] else "false"
+
     quote = cfg["quote"]
-    bases = cfg["symbols"]
     timeframe = cfg["timeframe"]
 
-    sig = cfg["signals"]
     rk = cfg["risk"]
     fees = cfg["fees"]
     lg = cfg["logging"]
@@ -618,33 +712,14 @@ def main():
     sleep_s = int(lg["loop_sleep_seconds"])
     candles_limit = int(lg["candles_limit"])
 
-    LOG.info(f"Trend bot started. Config={cfg.get('_cfg_path')}  DRY_RUN={dry_run}")
-    LOG.info(
-        f"Signals: SMA({sig['use_sma']},{sig['sma_fast']}/{sig['sma_slow']}), "
-        f"RSI({sig['use_rsi']},len={sig['rsi_len']},min={sig['rsi_buy_min']}), "
-        f"ATR exits(tp={sig['atr_tp_mult']},sl={sig['atr_sl_mult']}), "
-        f"ATR filter={sig['use_atr_filter']} min_atr_pct={sig['min_atr_pct']}, "
-        f"exit_on_trend_break={sig['exit_on_trend_break']}"
-    )
-    LOG.info(
-        f"Risk: stake={stake} {quote}, max_open={max_open}, cooldown={cooldown_min}m, "
-        f"max_spread_pct={max_spread_pct}% (percent units), eur_reserve={eur_reserve} {quote}"
+    LOG.info(f"Trend bot started. Config={cfg.get('_cfg_path')} DRY_RUN={dry_run}")
+    send_email_alert(
+        "Bot gestart",
+        f"Diamond bot gestart\nConfig: {cfg.get('_cfg_path')}\nDRY_RUN: {dry_run}\nMax open posities: {max_open}"
     )
 
     ex = make_exchange()
     ex.load_markets()
-
-    valid_bases = []
-    for base in bases:
-        market = market_symbol(base, quote)
-        if market not in ex.markets:
-            LOG.warning(f"Market not found on exchange, skipping: {market}")
-            continue
-        valid_bases.append(base)
-
-    if not valid_bases:
-        raise RuntimeError("None of the configured symbols exist on the exchange.")
-    bases = valid_bases
 
     state = load_state()
     ensure_csv_header()
@@ -658,121 +733,153 @@ def main():
             state.setdefault("positions", {})
             state.setdefault("cooldown", {})
 
-            for base in bases:
-                market = market_symbol(base, quote)
-                now = time.time()
+            # Eerst bestaande posities beheren
+            existing_markets = list((state.get("positions", {}) or {}).keys())
 
+            for market in existing_markets:
                 positions = state.get("positions", {}) or {}
-                in_pos = market in positions
+                if market not in positions:
+                    continue
 
-                # IMPORTANT FIX:
-                # cooldown is checked for BUY only; SELL must always remain active
-                next_ok = float((state.get("cooldown", {}) or {}).get(market, 0) or 0)
+                pos = positions[market]
+                if not to_bool(pos.get("opened_by_bot", False), False):
+                    continue
 
-                # spread
                 try:
                     tkr = fetch_ticker(ex, market)
                     spr = calc_spread_pct(tkr)
-                except Exception as e:
-                    log_skip(market, f"SKIP ticker error: {e}", skip_every)
-                    continue
+                    if spr > max_spread_pct:
+                        continue
 
-                if spr > max_spread_pct:
-                    log_skip(market, f"SKIP spread {spr:.3f}% > {max_spread_pct:.3f}%", skip_every)
-                    continue
-
-                # candles + signal
-                try:
                     df = fetch_candles(ex, market, timeframe, candles_limit)
                     s = compute_signal(df, cfg)
+                    last_price = float(s["last_close"])
                 except Exception as e:
-                    log_skip(market, f"SKIP candles error: {e}", skip_every)
+                    log_skip(market, f"SELL check failed: {e}", skip_every)
                     continue
 
-                last_price = float(s["last_close"])
+                do_sell, reason, tp, sl = should_sell(s, pos, cfg, last_price)
+                if not do_sell:
+                    continue
 
-                # ---------- SELL (bot-only, never blocked by cooldown) ----------
-                if in_pos:
-                    pos = positions[market]
-
-                    if not to_bool(pos.get("opened_by_bot", False), False):
-                        # hard safety: never touch existing/manual coins
-                        continue
-
-                    do_sell, reason, tp, sl = should_sell(s, pos, cfg, last_price)
-                    if not do_sell:
-                        continue
-
-                    base_amount = float(pos["base_amount"])
-                    try:
-                        order, filled, avg, proceeds, sell_fee, _ = place_market_sell(
-                            ex, market, base_amount, taker_fee_pct, dry_run
-                        )
-                    except Exception as e:
-                        log_skip(market, f"SELL failed: {e}", skip_every)
-                        continue
-
-                    entry_cost = float(pos.get("entry_cost_quote", 0.0))
-                    entry_fee = float(pos.get("entry_fee_quote", 0.0))
-                    net_pnl = (proceeds - entry_cost) - (entry_fee + sell_fee)
-
-                    hold_min = 0.0
-                    entry_ts = pos.get("entry_ts")
-                    if entry_ts:
-                        try:
-                            t0 = datetime.fromisoformat(entry_ts)
-                            hold_min = (datetime.now(timezone.utc).astimezone() - t0).total_seconds() / 60.0
-                        except Exception:
-                            hold_min = 0.0
-
-                    state["pnl_quote"] = float(state.get("pnl_quote", 0.0)) + float(net_pnl)
-                    state["trades"] = int(state.get("trades", 0)) + 1
-                    if net_pnl > 0:
-                        state["wins"] = int(state.get("wins", 0)) + 1
-
-                    # cooldown after exit only
-                    state["cooldown"][market] = time.time() + cooldown_min * 60
-
-                    del state["positions"][market]
-                    save_state(state)
-
-                    row = {
-                        "ts": now_iso(),
-                        "market": market,
-                        "side": "SELL",
-                        "price": avg,
-                        "base_amount": filled,
-                        "fees_quote": (entry_fee + sell_fee),
-                        "spread_pct": spr,
-                        "net_pnl_quote": net_pnl,
-                        "holding_time_min": hold_min,
-                        "reason": reason,
-                        "dry_run": dry_run,
-                    }
-                    append_tx(row)
-
-                    winrate = (state["wins"] / state["trades"] * 100.0) if state["trades"] else 0.0
-                    LOG.info(
-                        f"{market} {reason} | PnL {quote} {fmt_eur(net_pnl)} | total {quote} {fmt_eur(state['pnl_quote'])} "
-                        f"| trades {state['trades']} winrate {winrate:.1f}% | hold {hold_min:.1f}m"
+                base_amount = float(pos["base_amount"])
+                try:
+                    order, filled, avg, proceeds, sell_fee, _ = place_market_sell(
+                        ex, market, base_amount, taker_fee_pct, dry_run
                     )
-
-                    balance = safe_fetch_balance(ex, retries=3, base_sleep=0.8)
-                    free_quote = get_free_quote(balance, quote)
+                except Exception as e:
+                    log_skip(market, f"SELL failed: {e}", skip_every)
                     continue
 
-                # ---------- BUY ----------
-                open_positions = len(state.get("positions", {}) or {})
+                entry_cost = float(pos.get("entry_cost_quote", 0.0))
+                entry_fee = float(pos.get("entry_fee_quote", 0.0))
+                net_pnl = (proceeds - entry_cost) - (entry_fee + sell_fee)
 
-                if open_positions >= max_open:
-                    log_skip(market, f"SKIP max_open_positions reached ({open_positions}/{max_open})", skip_every)
-                    continue
+                hold_min = 0.0
+                entry_ts = pos.get("entry_ts")
+                if entry_ts:
+                    try:
+                        t0 = datetime.fromisoformat(entry_ts)
+                        hold_min = (datetime.now(timezone.utc).astimezone() - t0).total_seconds() / 60.0
+                    except Exception:
+                        hold_min = 0.0
+
+                state["pnl_quote"] = float(state.get("pnl_quote", 0.0)) + float(net_pnl)
+                state["trades"] = int(state.get("trades", 0)) + 1
+                if net_pnl > 0:
+                    state["wins"] = int(state.get("wins", 0)) + 1
+
+                state["cooldown"][market] = time.time() + cooldown_min * 60
+                del state["positions"][market]
+                save_state(state)
+
+                row = {
+                    "ts": now_iso(),
+                    "market": market,
+                    "side": "SELL",
+                    "price": avg,
+                    "base_amount": filled,
+                    "fees_quote": (entry_fee + sell_fee),
+                    "spread_pct": spr,
+                    "net_pnl_quote": net_pnl,
+                    "holding_time_min": hold_min,
+                    "reason": reason,
+                    "dry_run": dry_run,
+                }
+                append_tx(row)
+
+                winrate = (state["wins"] / state["trades"] * 100.0) if state["trades"] else 0.0
+                msg = (
+                    f"{market} {reason} | PnL {quote} {fmt_eur(net_pnl)} | totaal {quote} {fmt_eur(state['pnl_quote'])} "
+                    f"| trades {state['trades']} | winrate {winrate:.1f}% | hold {hold_min:.1f}m"
+                )
+                LOG.info(msg)
+                send_email_alert(
+                    f"SELL {market}",
+                    f"Markt: {market}\n"
+                    f"Reden: {reason}\n"
+                    f"PnL: {quote} {fmt_eur(net_pnl)}\n"
+                    f"Totaal PnL: {quote} {fmt_eur(state['pnl_quote'])}\n"
+                    f"Trades: {state['trades']}\n"
+                    f"Winrate: {winrate:.1f}%\n"
+                    f"Holding time: {hold_min:.1f} min\n"
+                    f"Dry run: {dry_run}"
+                )
+
+                balance = safe_fetch_balance(ex, retries=3, base_sleep=0.8)
+                free_quote = get_free_quote(balance, quote)
+
+            # Daarna nieuwe markten scannen
+            scan_markets = get_scan_markets(ex, cfg)
+            LOG.info(f"Scanner vond {len(scan_markets)} markten")
+
+            candidates = []
+            for market in scan_markets:
+                positions = state.get("positions", {}) or {}
+                in_pos = market in positions
+                next_ok = float((state.get("cooldown", {}) or {}).get(market, 0) or 0)
 
                 if only_buy_if_not_in_pos and in_pos:
                     continue
 
-                if now < next_ok:
+                if time.time() < next_ok:
                     continue
+
+                try:
+                    tkr = fetch_ticker(ex, market)
+                    spr = calc_spread_pct(tkr)
+                    if spr > max_spread_pct:
+                        continue
+
+                    df = fetch_candles(ex, market, timeframe, candles_limit)
+                    s = compute_signal(df, cfg)
+                    ok, reason = should_buy(s, in_pos, cfg)
+                    if not ok:
+                        continue
+
+                    score = candidate_score(s, spr)
+
+                    candidates.append({
+                        "market": market,
+                        "score": score,
+                        "signal": s,
+                        "spread_pct": spr,
+                    })
+                except Exception as e:
+                    log_skip(market, f"SCAN failed: {e}", skip_every)
+                    continue
+
+            candidates = sorted(candidates, key=lambda x: x["score"], reverse=True)
+
+            for cand in candidates:
+                positions = state.get("positions", {}) or {}
+                open_positions = len(positions)
+
+                if open_positions >= max_open:
+                    break
+
+                market = cand["market"]
+                spr = cand["spread_pct"]
 
                 if free_quote < (stake + eur_reserve):
                     log_skip(
@@ -780,12 +887,7 @@ def main():
                         f"SKIP reserve (free {fmt_eur(free_quote)} < stake+reserve {fmt_eur(stake + eur_reserve)})",
                         skip_every,
                     )
-                    continue
-
-                ok, reason = should_buy(s, in_pos, cfg)
-                if not ok:
-                    log_skip(market, reason, skip_every)
-                    continue
+                    break
 
                 try:
                     order, filled, avg, cost, buy_fee, _ = place_market_buy(
@@ -802,6 +904,7 @@ def main():
                     "entry_ts": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
                     "entry_cost_quote": cost,
                     "entry_fee_quote": buy_fee,
+                    "score_at_entry": cand["score"],
                 }
                 save_state(state)
 
@@ -815,13 +918,20 @@ def main():
                     "spread_pct": spr,
                     "net_pnl_quote": 0.0,
                     "holding_time_min": 0.0,
-                    "reason": reason,
+                    "reason": f"BUY score {cand['score']}",
                     "dry_run": dry_run,
                 }
                 append_tx(row)
 
-                LOG.info(
-                    f"{market} BUY | stake {quote} {fmt_eur(stake)} @ {avg:.6f} | spread {spr:.3f}%"
+                LOG.info(f"{market} BUY | score {cand['score']} | stake {quote} {fmt_eur(stake)} @ {avg:.6f} | spread {spr:.3f}%")
+                send_email_alert(
+                    f"BUY {market}",
+                    f"Markt: {market}\n"
+                    f"Score: {cand['score']}\n"
+                    f"Stake: {quote} {fmt_eur(stake)}\n"
+                    f"Prijs: {avg:.6f}\n"
+                    f"Spread: {spr:.3f}%\n"
+                    f"Dry run: {dry_run}"
                 )
 
                 balance = safe_fetch_balance(ex, retries=3, base_sleep=0.8)
@@ -834,7 +944,9 @@ def main():
             break
         except Exception as e:
             LOG.error(f"Main loop error: {e}")
+            send_email_alert("Bot fout", str(e))
             time.sleep(10)
+
 
 if __name__ == "__main__":
     main()
