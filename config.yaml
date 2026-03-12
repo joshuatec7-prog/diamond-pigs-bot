@@ -47,6 +47,3 @@ logging:
   level: INFO
   loop_sleep_seconds: 60
   candles_limit: 250
-
-alerts:
-  email_enabled: true
