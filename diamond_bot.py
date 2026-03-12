@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Diamond-Pigs AutoScan v3.1 - Bitvavo via ccxt
+# Diamond-Pigs AutoScan v3.2 - Bitvavo via ccxt
 #
 # Functies:
 # - Automatische scan van EUR-markten op Bitvavo
@@ -208,8 +208,8 @@ def load_cfg() -> Dict[str, Any]:
     _assert_no_unknown("logging", lg, ALLOWED_LOG_KEYS)
 
     sc.setdefault("auto_scan", True)
-    sc.setdefault("top_n_markets", 25)
-    sc.setdefault("min_quote_volume", 250000)
+    sc.setdefault("top_n_markets", 20)
+    sc.setdefault("min_quote_volume", 500000)
     sc.setdefault("exclude_bases", ["EUR", "USDT", "USDC"])
 
     sig.setdefault("use_sma", True)
@@ -228,10 +228,10 @@ def load_cfg() -> Dict[str, Any]:
     sig.setdefault("min_atr_pct", 0.35)
 
     rk.setdefault("fixed_stake_quote", 30.0)
-    rk.setdefault("max_open_positions", 5)
+    rk.setdefault("max_open_positions", 3)
     rk.setdefault("only_buy_if_not_in_position", True)
     rk.setdefault("cooldown_minutes", 45)
-    rk.setdefault("max_spread_pct", 0.35)
+    rk.setdefault("max_spread_pct", 0.30)
     rk.setdefault("eur_reserve", 50.0)
     rk.setdefault("dry_run", True)
     rk.setdefault("skip_log_every_seconds", 600)
@@ -246,8 +246,8 @@ def load_cfg() -> Dict[str, Any]:
     cfg["timeframe"] = str(cfg["timeframe"]).strip()
 
     sc["auto_scan"] = to_bool(sc.get("auto_scan"), True)
-    sc["top_n_markets"] = to_int(sc.get("top_n_markets"), 25)
-    sc["min_quote_volume"] = to_float(sc.get("min_quote_volume"), 250000)
+    sc["top_n_markets"] = to_int(sc.get("top_n_markets"), 20)
+    sc["min_quote_volume"] = to_float(sc.get("min_quote_volume"), 500000)
     sc["exclude_bases"] = [str(x).upper().strip() for x in sc.get("exclude_bases", []) if str(x).strip()]
 
     sig["use_sma"] = to_bool(sig.get("use_sma"), True)
@@ -266,10 +266,10 @@ def load_cfg() -> Dict[str, Any]:
     sig["min_atr_pct"] = to_float(sig.get("min_atr_pct"), 0.35)
 
     rk["fixed_stake_quote"] = to_float(rk.get("fixed_stake_quote"), 30.0)
-    rk["max_open_positions"] = to_int(rk.get("max_open_positions"), 5)
+    rk["max_open_positions"] = to_int(rk.get("max_open_positions"), 3)
     rk["only_buy_if_not_in_position"] = to_bool(rk.get("only_buy_if_not_in_position"), True)
     rk["cooldown_minutes"] = to_int(rk.get("cooldown_minutes"), 45)
-    rk["max_spread_pct"] = to_float(rk.get("max_spread_pct"), 0.35)
+    rk["max_spread_pct"] = to_float(rk.get("max_spread_pct"), 0.30)
     rk["eur_reserve"] = to_float(rk.get("eur_reserve"), 50.0)
     rk["dry_run"] = to_bool(rk.get("dry_run"), True)
     rk["skip_log_every_seconds"] = max(10, to_int(rk.get("skip_log_every_seconds"), 600))
@@ -518,7 +518,7 @@ def candidate_score(signal: Dict[str, Any], spread_pct: float) -> float:
         score += 10
     if spread_pct < 0.20:
         score += 10
-    elif spread_pct < 0.35:
+    elif spread_pct < 0.30:
         score += 5
     score += min(signal["atr_pct"], 5.0) * 2
     return round(score, 2)
@@ -699,8 +699,6 @@ def main():
                 try:
                     tkr = fetch_ticker(ex, market)
                     spr = calc_spread_pct(tkr)
-                    if spr > max_spread_pct:
-                        continue
 
                     df = fetch_candles(ex, market, timeframe, candles_limit)
                     s = compute_signal(df, cfg)
