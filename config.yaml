@@ -3,8 +3,8 @@ timeframe: 15m
 
 scanner:
   auto_scan: true
-  top_n_markets: 25
-  min_quote_volume: 250000
+  top_n_markets: 20
+  min_quote_volume: 500000
   exclude_bases:
     - EUR
     - USDT
@@ -32,10 +32,10 @@ signals:
 
 risk:
   fixed_stake_quote: 30
-  max_open_positions: 5
+  max_open_positions: 3
   only_buy_if_not_in_position: true
   cooldown_minutes: 45
-  max_spread_pct: 0.35
+  max_spread_pct: 0.30
   eur_reserve: 50
   dry_run: true
   skip_log_every_seconds: 600
