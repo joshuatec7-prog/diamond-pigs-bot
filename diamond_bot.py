@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# Diamond-Pigs AutoScan v3.0 - Bitvavo via ccxt
+# Diamond-Pigs AutoScan v3.1 - Bitvavo via ccxt
 #
 # Functies:
 # - Automatische scan van EUR-markten op Bitvavo
 # - Selecteert kansrijke coins op volume + spread + trend + RSI + ATR
 # - Kan meerdere coins tegelijk openen
 # - Verkoopt alleen posities die deze bot zelf heeft geopend
-# - E-mail alerts
 # - DRY_RUN veilig testen
 #
 # Requirements: ccxt, pandas, pyyaml, python-dotenv
@@ -16,9 +15,6 @@ import time
 import json
 import math
 import logging
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Tuple, List
@@ -129,40 +125,9 @@ def setup_logging(level: str):
     )
 
 
-# ------------------ Alerts ------------------
-
-def send_email_alert(subject: str, message: str):
-    enabled = to_bool(os.getenv("EMAIL_ENABLED", "true"), True)
-    if not enabled:
-        return
-
-    email_to = os.getenv("ALERT_EMAIL_TO", "").strip()
-    email_from = os.getenv("ALERT_EMAIL_FROM", "").strip()
-    email_password = os.getenv("ALERT_EMAIL_PASSWORD", "").strip()
-
-    if not email_to or not email_from or not email_password:
-        LOG.info(f"E-mail niet ingesteld: {subject}")
-        return
-
-    try:
-        msg = MIMEMultipart()
-        msg["From"] = email_from
-        msg["To"] = email_to
-        msg["Subject"] = subject
-        msg.attach(MIMEText(message, "plain", "utf-8"))
-
-        server = smtplib.SMTP("smtp.gmail.com", 587, timeout=20)
-        server.starttls()
-        server.login(email_from, email_password)
-        server.sendmail(email_from, email_to, msg.as_string())
-        server.quit()
-    except Exception as e:
-        LOG.warning(f"E-mail fout: {e}")
-
-
 # ------------------ Config ------------------
 
-ALLOWED_TOP_KEYS = {"quote", "timeframe", "scanner", "signals", "risk", "fees", "logging", "alerts"}
+ALLOWED_TOP_KEYS = {"quote", "timeframe", "scanner", "signals", "risk", "fees", "logging"}
 ALLOWED_SCANNER_KEYS = {"auto_scan", "top_n_markets", "min_quote_volume", "exclude_bases"}
 ALLOWED_SIGNALS_KEYS = {
     "use_sma", "sma_fast", "sma_slow",
@@ -178,7 +143,6 @@ ALLOWED_RISK_KEYS = {
 }
 ALLOWED_FEES_KEYS = {"taker_fee_pct"}
 ALLOWED_LOG_KEYS = {"level", "loop_sleep_seconds", "candles_limit"}
-ALLOWED_ALERTS_KEYS = {"email_enabled"}
 
 
 def _assert_no_unknown(section: str, data: Any, allowed: set):
@@ -230,21 +194,18 @@ def load_cfg() -> Dict[str, Any]:
     cfg.setdefault("risk", {})
     cfg.setdefault("fees", {})
     cfg.setdefault("logging", {})
-    cfg.setdefault("alerts", {})
 
     sc = cfg["scanner"]
     sig = cfg["signals"]
     rk = cfg["risk"]
     fees = cfg["fees"]
     lg = cfg["logging"]
-    al = cfg["alerts"]
 
     _assert_no_unknown("scanner", sc, ALLOWED_SCANNER_KEYS)
     _assert_no_unknown("signals", sig, ALLOWED_SIGNALS_KEYS)
     _assert_no_unknown("risk", rk, ALLOWED_RISK_KEYS)
     _assert_no_unknown("fees", fees, ALLOWED_FEES_KEYS)
     _assert_no_unknown("logging", lg, ALLOWED_LOG_KEYS)
-    _assert_no_unknown("alerts", al, ALLOWED_ALERTS_KEYS)
 
     sc.setdefault("auto_scan", True)
     sc.setdefault("top_n_markets", 25)
@@ -280,8 +241,6 @@ def load_cfg() -> Dict[str, Any]:
     lg.setdefault("level", "INFO")
     lg.setdefault("loop_sleep_seconds", 60)
     lg.setdefault("candles_limit", 250)
-
-    al.setdefault("email_enabled", True)
 
     cfg["quote"] = str(cfg["quote"]).upper().strip()
     cfg["timeframe"] = str(cfg["timeframe"]).strip()
@@ -320,8 +279,6 @@ def load_cfg() -> Dict[str, Any]:
     lg["level"] = str(lg.get("level", "INFO")).upper()
     lg["loop_sleep_seconds"] = to_int(lg.get("loop_sleep_seconds"), 60)
     lg["candles_limit"] = to_int(lg.get("candles_limit"), 250)
-
-    al["email_enabled"] = to_bool(al.get("email_enabled"), True)
 
     validate_cfg(cfg)
     cfg["_cfg_path"] = str(CFG_FILE)
@@ -690,8 +647,6 @@ def main():
     cfg = load_cfg()
     setup_logging(cfg["logging"]["level"])
 
-    os.environ["EMAIL_ENABLED"] = "true" if cfg["alerts"]["email_enabled"] else "false"
-
     quote = cfg["quote"]
     timeframe = cfg["timeframe"]
 
@@ -713,10 +668,6 @@ def main():
     candles_limit = int(lg["candles_limit"])
 
     LOG.info(f"Trend bot started. Config={cfg.get('_cfg_path')} DRY_RUN={dry_run}")
-    send_email_alert(
-        "Bot gestart",
-        f"Diamond bot gestart\nConfig: {cfg.get('_cfg_path')}\nDRY_RUN: {dry_run}\nMax open posities: {max_open}"
-    )
 
     ex = make_exchange()
     ex.load_markets()
@@ -809,21 +760,9 @@ def main():
                 append_tx(row)
 
                 winrate = (state["wins"] / state["trades"] * 100.0) if state["trades"] else 0.0
-                msg = (
+                LOG.info(
                     f"{market} {reason} | PnL {quote} {fmt_eur(net_pnl)} | totaal {quote} {fmt_eur(state['pnl_quote'])} "
                     f"| trades {state['trades']} | winrate {winrate:.1f}% | hold {hold_min:.1f}m"
-                )
-                LOG.info(msg)
-                send_email_alert(
-                    f"SELL {market}",
-                    f"Markt: {market}\n"
-                    f"Reden: {reason}\n"
-                    f"PnL: {quote} {fmt_eur(net_pnl)}\n"
-                    f"Totaal PnL: {quote} {fmt_eur(state['pnl_quote'])}\n"
-                    f"Trades: {state['trades']}\n"
-                    f"Winrate: {winrate:.1f}%\n"
-                    f"Holding time: {hold_min:.1f} min\n"
-                    f"Dry run: {dry_run}"
                 )
 
                 balance = safe_fetch_balance(ex, retries=3, base_sleep=0.8)
@@ -923,15 +862,8 @@ def main():
                 }
                 append_tx(row)
 
-                LOG.info(f"{market} BUY | score {cand['score']} | stake {quote} {fmt_eur(stake)} @ {avg:.6f} | spread {spr:.3f}%")
-                send_email_alert(
-                    f"BUY {market}",
-                    f"Markt: {market}\n"
-                    f"Score: {cand['score']}\n"
-                    f"Stake: {quote} {fmt_eur(stake)}\n"
-                    f"Prijs: {avg:.6f}\n"
-                    f"Spread: {spr:.3f}%\n"
-                    f"Dry run: {dry_run}"
+                LOG.info(
+                    f"{market} BUY | score {cand['score']} | stake {quote} {fmt_eur(stake)} @ {avg:.6f} | spread {spr:.3f}%"
                 )
 
                 balance = safe_fetch_balance(ex, retries=3, base_sleep=0.8)
@@ -944,7 +876,6 @@ def main():
             break
         except Exception as e:
             LOG.error(f"Main loop error: {e}")
-            send_email_alert("Bot fout", str(e))
             time.sleep(10)
 
 
