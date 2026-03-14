@@ -27,7 +27,7 @@ signals:
 
   exit_on_trend_break: true
 
-  use_atr_filter: true
+  use_atr_filter: false
   min_atr_pct: 0.35
 
 risk:
