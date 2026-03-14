@@ -37,7 +37,7 @@ risk:
   cooldown_minutes: 45
   max_spread_pct: 0.30
   eur_reserve: 50
-  dry_run: true
+  dry_run: false
   skip_log_every_seconds: 600
 
 fees:
