@@ -1,6 +1,5 @@
 quote: EUR
 timeframe: 15m
-
 scanner:
   auto_scan: true
   top_n_markets: 20
@@ -9,27 +8,21 @@ scanner:
     - EUR
     - USDT
     - USDC
-
 signals:
   use_sma: true
   sma_fast: 20
   sma_slow: 60
-
   use_rsi: true
   rsi_len: 14
   rsi_buy_min: 55
   rsi_buy_max: 72
-
   use_atr: true
   atr_len: 14
   atr_tp_mult: 2.0
   atr_sl_mult: 1.8
-
   exit_on_trend_break: true
-
   use_atr_filter: false
   min_atr_pct: 0.35
-
 risk:
   fixed_stake_quote: 30
   max_open_positions: 3
@@ -39,202 +32,8 @@ risk:
   eur_reserve: 50
   dry_run: false
   skip_log_every_seconds: 600
-
 fees:
   taker_fee_pct: 0.25
-
-logging:
-  level: INFO
-  loop_sleep_seconds: 60
-  candles_limit: 250quote: EUR
-timeframe: 15m
-
-scanner:
-  auto_scan: true
-  top_n_markets: 20
-  min_quote_volume: 500000
-  exclude_bases:
-    - EUR
-    - USDT
-    - USDC
-
-signals:
-  use_sma: true
-  sma_fast: 20
-  sma_slow: 60
-
-  use_rsi: true
-  rsi_len: 14
-  rsi_buy_min: 55
-  rsi_buy_max: 72
-
-  use_atr: true
-  atr_len: 14
-  atr_tp_mult: 2.0
-  atr_sl_mult: 1.8
-
-  exit_on_trend_break: true
-
-  use_atr_filter: false
-  min_atr_pct: 0.35
-
-risk:
-  fixed_stake_quote: 30
-  max_open_positions: 3
-  only_buy_if_not_in_position: true
-  cooldown_minutes: 45
-  max_spread_pct: 0.30
-  eur_reserve: 50
-  dry_run: false
-  skip_log_every_seconds: 600
-
-fees:
-  taker_fee_pct: 0.25
-
-logging:
-  level: INFO
-  loop_sleep_seconds: 60
-  candles_limit: 250quote: EUR
-timeframe: 15m
-
-scanner:
-  auto_scan: true
-  top_n_markets: 20
-  min_quote_volume: 500000
-  exclude_bases:
-    - EUR
-    - USDT
-    - USDC
-
-signals:
-  use_sma: true
-  sma_fast: 20
-  sma_slow: 60
-
-  use_rsi: true
-  rsi_len: 14
-  rsi_buy_min: 55
-  rsi_buy_max: 72
-
-  use_atr: true
-  atr_len: 14
-  atr_tp_mult: 2.0
-  atr_sl_mult: 1.8
-
-  exit_on_trend_break: true
-
-  use_atr_filter: false
-  min_atr_pct: 0.35
-
-risk:
-  fixed_stake_quote: 30
-  max_open_positions: 3
-  only_buy_if_not_in_position: true
-  cooldown_minutes: 45
-  max_spread_pct: 0.30
-  eur_reserve: 50
-  dry_run: false
-  skip_log_every_seconds: 600
-
-fees:
-  taker_fee_pct: 0.25
-
-logging:
-  level: INFO
-  loop_sleep_seconds: 60
-  candles_limit: 250quote: EUR
-timeframe: 15m
-
-scanner:
-  auto_scan: true
-  top_n_markets: 20
-  min_quote_volume: 500000
-  exclude_bases:
-    - EUR
-    - USDT
-    - USDC
-
-signals:
-  use_sma: true
-  sma_fast: 20
-  sma_slow: 60
-
-  use_rsi: true
-  rsi_len: 14
-  rsi_buy_min: 55
-  rsi_buy_max: 72
-
-  use_atr: true
-  atr_len: 14
-  atr_tp_mult: 2.0
-  atr_sl_mult: 1.8
-
-  exit_on_trend_break: true
-
-  use_atr_filter: false
-  min_atr_pct: 0.35
-
-risk:
-  fixed_stake_quote: 30
-  max_open_positions: 3
-  only_buy_if_not_in_position: true
-  cooldown_minutes: 45
-  max_spread_pct: 0.30
-  eur_reserve: 50
-  dry_run: false
-  skip_log_every_seconds: 600
-
-fees:
-  taker_fee_pct: 0.25
-
-logging:
-  level: INFO
-  loop_sleep_seconds: 60
-  candles_limit: 250quote: EUR
-timeframe: 15m
-
-scanner:
-  auto_scan: true
-  top_n_markets: 20
-  min_quote_volume: 500000
-  exclude_bases:
-    - EUR
-    - USDT
-    - USDC
-
-signals:
-  use_sma: true
-  sma_fast: 20
-  sma_slow: 60
-
-  use_rsi: true
-  rsi_len: 14
-  rsi_buy_min: 55
-  rsi_buy_max: 72
-
-  use_atr: true
-  atr_len: 14
-  atr_tp_mult: 2.0
-  atr_sl_mult: 1.8
-
-  exit_on_trend_break: true
-
-  use_atr_filter: false
-  min_atr_pct: 0.35
-
-risk:
-  fixed_stake_quote: 30
-  max_open_positions: 3
-  only_buy_if_not_in_position: true
-  cooldown_minutes: 45
-  max_spread_pct: 0.30
-  eur_reserve: 50
-  dry_run: false
-  skip_log_every_seconds: 600
-
-fees:
-  taker_fee_pct: 0.25
-
 logging:
   level: INFO
   loop_sleep_seconds: 60
