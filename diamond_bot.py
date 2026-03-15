@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
-# Diamond-Pigs AutoScan v3.2 - Bitvavo via ccxt
-#
-# Functies:
-# - Automatische scan van EUR-markten op Bitvavo
-# - Selecteert kansrijke coins op volume + spread + trend + RSI + ATR
-# - Kan meerdere coins tegelijk openen
-# - Verkoopt alleen posities die deze bot zelf heeft geopend
-# - DRY_RUN veilig testen
-#
-# Requirements: ccxt, pandas, pyyaml, python-dotenv
+# Diamond-Pigs AutoScan v3.3 - Bitvavo via ccxt
 
 import os
 import time
@@ -324,15 +315,36 @@ def append_tx(row: Dict[str, Any]):
 def make_exchange():
     api_key = os.getenv("BITVAVO_API_KEY", "").strip()
     api_secret = os.getenv("BITVAVO_API_SECRET", "").strip()
+    operator_id_raw = os.getenv("BITVAVO_OPERATOR_ID", "").strip()
+
     if not api_key or not api_secret:
         raise RuntimeError("Missing BITVAVO_API_KEY / BITVAVO_API_SECRET.")
+
+    if not operator_id_raw:
+        raise RuntimeError("Missing BITVAVO_OPERATOR_ID.")
+
+    try:
+        operator_id = int(operator_id_raw)
+    except ValueError:
+        raise RuntimeError("BITVAVO_OPERATOR_ID must be an integer.")
 
     ex = ccxt.bitvavo({
         "apiKey": api_key,
         "secret": api_secret,
         "enableRateLimit": True,
+        "options": {
+            "operatorId": operator_id,
+        },
     })
     return ex
+
+
+def get_order_params(ex) -> Dict[str, Any]:
+    try:
+        operator_id = int((getattr(ex, "options", {}) or {}).get("operatorId"))
+        return {"operatorId": operator_id}
+    except Exception:
+        return {}
 
 
 def safe_fetch_balance(ex, retries=5, base_sleep=1.0):
@@ -506,7 +518,7 @@ def compute_signal(df: pd.DataFrame, cfg: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def candidate_score(signal: Dict[str, Any], spread_pct: float) -> float:
+def candidate_score(signal: Dict[str, Any], spread_pct: float, cfg: Dict[str, Any]) -> float:
     score = 0.0
     if signal["trend_up"]:
         score += 40
@@ -514,12 +526,15 @@ def candidate_score(signal: Dict[str, Any], spread_pct: float) -> float:
         score += 20
     if signal["momentum_up"]:
         score += 10
-    if signal["atr_filter_ok"]:
+
+    if cfg["signals"]["use_atr_filter"] and signal["atr_filter_ok"]:
         score += 10
+
     if spread_pct < 0.20:
         score += 10
     elif spread_pct < 0.30:
         score += 5
+
     score += min(signal["atr_pct"], 5.0) * 2
     return round(score, 2)
 
@@ -587,7 +602,14 @@ def place_market_buy(ex, market: str, stake_quote: float, taker_fee_pct: float, 
         fee_q = fee_from_order_or_estimate(fake, cost, taker_fee_pct)
         return fake, filled, avg, cost, fee_q, ticker
 
-    order = ex.create_order(market, "market", "buy", base_amount)
+    order = ex.create_order(
+        market,
+        "market",
+        "buy",
+        base_amount,
+        None,
+        get_order_params(ex),
+    )
     filled = float(order.get("filled") or base_amount)
     avg = float(order.get("average") or ask)
     cost = float(order.get("cost") or (filled * avg))
@@ -617,7 +639,14 @@ def place_market_sell(ex, market: str, base_amount: float, taker_fee_pct: float,
         fee_q = fee_from_order_or_estimate(fake, proceeds, taker_fee_pct)
         return fake, filled, avg, proceeds, fee_q, ticker
 
-    order = ex.create_order(market, "market", "sell", base_amount)
+    order = ex.create_order(
+        market,
+        "market",
+        "sell",
+        base_amount,
+        None,
+        get_order_params(ex),
+    )
     filled = float(order.get("filled") or base_amount)
     avg = float(order.get("average") or bid)
     proceeds = float(order.get("cost") or (filled * avg))
@@ -684,7 +713,6 @@ def main():
             state.setdefault("positions", {})
             state.setdefault("cooldown", {})
 
-            # Eerst bestaande posities beheren
             existing_markets = list((state.get("positions", {}) or {}).keys())
 
             for market in existing_markets:
@@ -766,7 +794,6 @@ def main():
                 balance = safe_fetch_balance(ex, retries=3, base_sleep=0.8)
                 free_quote = get_free_quote(balance, quote)
 
-            # Daarna nieuwe markten scannen
             scan_markets = get_scan_markets(ex, cfg)
             LOG.info(f"Scanner vond {len(scan_markets)} markten")
 
@@ -794,7 +821,7 @@ def main():
                     if not ok:
                         continue
 
-                    score = candidate_score(s, spr)
+                    score = candidate_score(s, spr, cfg)
 
                     candidates.append({
                         "market": market,
