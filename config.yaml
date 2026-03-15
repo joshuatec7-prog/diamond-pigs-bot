@@ -25,7 +25,7 @@ signals:
   min_atr_pct: 0.35
 risk:
   fixed_stake_quote: 30
-  max_open_positions: 3
+  max_open_positions: 5
   only_buy_if_not_in_position: true
   cooldown_minutes: 45
   max_spread_pct: 0.30
