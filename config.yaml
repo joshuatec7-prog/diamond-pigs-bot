@@ -4,8 +4,8 @@ timeframe: "15m"
 
 scanner:
   auto_scan: true
-  top_n_markets: 40
-  min_quote_volume: 250000
+  top_n_markets: 20
+  min_quote_volume: 1000000
   exclude_bases:
     - EUR
     - USDT
@@ -18,25 +18,25 @@ signals:
 
   use_rsi: true
   rsi_len: 14
-  rsi_buy_min: 58
+  rsi_buy_min: 60
 
   use_atr: true
   atr_len: 14
-  atr_tp_mult: 2.2
-  atr_sl_mult: 1.8
+  atr_tp_mult: 2.4
+  atr_sl_mult: 1.6
 
   exit_on_trend_break: true
 
   use_atr_filter: true
-  min_atr_pct: 0.30
+  min_atr_pct: 0.35
 
 risk:
   dry_run: false
   fixed_stake_quote: 30
-  max_open_positions: 5
+  max_open_positions: 3
   only_buy_if_not_in_position: true
-  cooldown_minutes: 45
-  max_spread_pct: 0.35
+  cooldown_minutes: 60
+  max_spread_pct: 0.25
   eur_reserve: 50
   skip_log_every_seconds: 900
 
