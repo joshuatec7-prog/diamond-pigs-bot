@@ -1,11 +1,11 @@
 quote: EUR
-symbols: [SOL]
+symbols: [BTC, ETH, XRP, SOL, TAO]
 timeframe: "15m"
 
 scanner:
-  auto_scan: true
-  top_n_markets: 20
-  min_quote_volume: 1000000
+  auto_scan: false
+  top_n_markets: 5
+  min_quote_volume: 0
   exclude_bases:
     - EUR
     - USDT
@@ -22,8 +22,8 @@ signals:
 
   use_atr: true
   atr_len: 14
-  atr_tp_mult: 2.4
-  atr_sl_mult: 1.6
+  atr_tp_mult: 2.6
+  atr_sl_mult: 1.5
 
   exit_on_trend_break: true
 
@@ -33,10 +33,10 @@ signals:
 risk:
   dry_run: false
   fixed_stake_quote: 30
-  max_open_positions: 3
+  max_open_positions: 5
   only_buy_if_not_in_position: true
   cooldown_minutes: 60
-  max_spread_pct: 0.25
+  max_spread_pct: 0.20
   eur_reserve: 50
   skip_log_every_seconds: 900
 
