@@ -22,10 +22,10 @@ signals:
 
   use_atr: true
   atr_len: 14
-  atr_tp_mult: 2.6
-  atr_sl_mult: 1.5
+  atr_tp_mult: 3.0
+  atr_sl_mult: 1.2
 
-  exit_on_trend_break: true
+  exit_on_trend_break: false
 
   use_atr_filter: true
   min_atr_pct: 0.35
@@ -39,6 +39,7 @@ risk:
   max_spread_pct: 0.20
   eur_reserve: 50
   skip_log_every_seconds: 900
+  min_profit_eur: 0.50
 
 fees:
   taker_fee_pct: 0.25
