@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-# Diamond-Pigs Trend v3 - Bitvavo via ccxt
-# - Scant Bitvavo EUR spot-markten
-# - Koopt max_open_positions munten
-# - Stake per koop = fixed_stake_quote
-# - Verkoopt alleen bot-posities uit state.json
-# - Scanner kiest liquide markten op basis van quote volume
+# Diamond-Pigs Trend v4 Hybrid - Bitvavo via ccxt
+# - Spot trading live
+# - Short logic as signal-only by default
+# - Eén scanner, één state.json, één logica
+# - Verkoopt nooit handmatige coins, alleen bot-posities uit state.json
 
 import os
 import time
@@ -111,6 +110,7 @@ ROOT = Path(__file__).parent
 CFG_FILE = Path(os.getenv("CFG_FILE", str(ROOT / "config.yaml")))
 STATE_FILE = Path(os.getenv("STATE_FILE", str(ROOT / "state.json")))
 TX_CSV = ROOT / "transactions.csv"
+SHORT_SIGNALS_CSV = ROOT / "short_signals.csv"
 
 def setup_logging(level: str):
     level = (level or "INFO").upper()
@@ -122,7 +122,10 @@ def setup_logging(level: str):
 
 # ------------------ Config ------------------
 
-ALLOWED_TOP_KEYS = {"quote", "symbols", "timeframe", "scanner", "signals", "risk", "fees", "logging"}
+ALLOWED_TOP_KEYS = {
+    "quote", "symbols", "timeframe", "scanner", "signals", "risk", "fees", "logging",
+    "trading", "short",
+}
 ALLOWED_SCANNER_KEYS = {"auto_scan", "top_n_markets", "min_quote_volume", "exclude_bases"}
 ALLOWED_SIGNALS_KEYS = {
     "use_sma", "sma_fast", "sma_slow",
@@ -134,10 +137,21 @@ ALLOWED_SIGNALS_KEYS = {
 ALLOWED_RISK_KEYS = {
     "fixed_stake_quote", "max_open_positions", "only_buy_if_not_in_position",
     "cooldown_minutes", "max_spread_pct", "eur_reserve",
-    "dry_run", "skip_log_every_seconds",
+    "dry_run", "skip_log_every_seconds", "min_profit_eur",
 }
 ALLOWED_FEES_KEYS = {"taker_fee_pct"}
 ALLOWED_LOG_KEYS = {"level", "loop_sleep_seconds", "candles_limit"}
+ALLOWED_TRADING_KEYS = {
+    "enable_spot", "enable_short_signals", "enable_auto_short",
+    "max_total_positions", "allow_long_and_short_same_symbol",
+}
+ALLOWED_SHORT_KEYS = {
+    "symbols", "leverage", "margin_per_trade", "cooldown_minutes",
+    "use_sma", "sma_fast", "sma_slow",
+    "use_rsi", "rsi_len", "rsi_sell_max",
+    "use_atr", "atr_len", "atr_tp_mult", "atr_sl_mult",
+    "use_atr_filter", "min_atr_pct",
+}
 
 def _assert_no_unknown(section: str, data: Any, allowed: set):
     if not isinstance(data, dict):
@@ -151,11 +165,15 @@ def validate_cfg(cfg: Dict[str, Any]):
     sig = cfg["signals"]
     rk = cfg["risk"]
     lg = cfg["logging"]
+    tr = cfg["trading"]
+    sh = cfg["short"]
 
     if not cfg["quote"]:
         raise ValueError("Config error: quote may not be empty.")
     if sig["use_sma"] and sig["sma_fast"] >= sig["sma_slow"]:
-        raise ValueError("Config error: sma_fast must be smaller than sma_slow.")
+        raise ValueError("Config error: signals.sma_fast must be smaller than signals.sma_slow.")
+    if sh["use_sma"] and sh["sma_fast"] >= sh["sma_slow"]:
+        raise ValueError("Config error: short.sma_fast must be smaller than short.sma_slow.")
     if rk["fixed_stake_quote"] <= 0:
         raise ValueError("Config error: fixed_stake_quote must be > 0.")
     if rk["max_open_positions"] <= 0:
@@ -170,6 +188,16 @@ def validate_cfg(cfg: Dict[str, Any]):
         raise ValueError("Config error: top_n_markets must be > 0.")
     if sc["min_quote_volume"] < 0:
         raise ValueError("Config error: min_quote_volume must be >= 0.")
+    if rk["min_profit_eur"] < 0:
+        raise ValueError("Config error: min_profit_eur must be >= 0.")
+    if tr["max_total_positions"] <= 0:
+        raise ValueError("Config error: max_total_positions must be > 0.")
+    if sh["leverage"] <= 0:
+        raise ValueError("Config error: short.leverage must be > 0.")
+    if sh["margin_per_trade"] <= 0:
+        raise ValueError("Config error: short.margin_per_trade must be > 0.")
+    if sh["cooldown_minutes"] < 0:
+        raise ValueError("Config error: short.cooldown_minutes must be >= 0.")
 
 def load_cfg() -> Dict[str, Any]:
     if not CFG_FILE.exists():
@@ -190,18 +218,24 @@ def load_cfg() -> Dict[str, Any]:
     cfg.setdefault("risk", {})
     cfg.setdefault("fees", {})
     cfg.setdefault("logging", {})
+    cfg.setdefault("trading", {})
+    cfg.setdefault("short", {})
 
     sc = cfg["scanner"]
     sig = cfg["signals"]
     rk = cfg["risk"]
     fees = cfg["fees"]
     lg = cfg["logging"]
+    tr = cfg["trading"]
+    sh = cfg["short"]
 
     _assert_no_unknown("scanner", sc, ALLOWED_SCANNER_KEYS)
     _assert_no_unknown("signals", sig, ALLOWED_SIGNALS_KEYS)
     _assert_no_unknown("risk", rk, ALLOWED_RISK_KEYS)
     _assert_no_unknown("fees", fees, ALLOWED_FEES_KEYS)
     _assert_no_unknown("logging", lg, ALLOWED_LOG_KEYS)
+    _assert_no_unknown("trading", tr, ALLOWED_TRADING_KEYS)
+    _assert_no_unknown("short", sh, ALLOWED_SHORT_KEYS)
 
     sc.setdefault("auto_scan", True)
     sc.setdefault("top_n_markets", 40)
@@ -230,12 +264,36 @@ def load_cfg() -> Dict[str, Any]:
     rk.setdefault("eur_reserve", 50.0)
     rk.setdefault("dry_run", False)
     rk.setdefault("skip_log_every_seconds", 900)
+    rk.setdefault("min_profit_eur", 0.30)
 
     fees.setdefault("taker_fee_pct", 0.25)
 
     lg.setdefault("level", "INFO")
     lg.setdefault("loop_sleep_seconds", 60)
     lg.setdefault("candles_limit", 400)
+
+    tr.setdefault("enable_spot", True)
+    tr.setdefault("enable_short_signals", True)
+    tr.setdefault("enable_auto_short", False)
+    tr.setdefault("max_total_positions", rk.get("max_open_positions", 5))
+    tr.setdefault("allow_long_and_short_same_symbol", False)
+
+    sh.setdefault("symbols", [])
+    sh.setdefault("leverage", 2)
+    sh.setdefault("margin_per_trade", 30.0)
+    sh.setdefault("cooldown_minutes", 60)
+    sh.setdefault("use_sma", True)
+    sh.setdefault("sma_fast", 20)
+    sh.setdefault("sma_slow", 60)
+    sh.setdefault("use_rsi", True)
+    sh.setdefault("rsi_len", 14)
+    sh.setdefault("rsi_sell_max", 40)
+    sh.setdefault("use_atr", True)
+    sh.setdefault("atr_len", 14)
+    sh.setdefault("atr_tp_mult", 2.5)
+    sh.setdefault("atr_sl_mult", 1.2)
+    sh.setdefault("use_atr_filter", True)
+    sh.setdefault("min_atr_pct", 0.35)
 
     cfg["quote"] = str(cfg["quote"]).upper().strip()
     cfg["symbols"] = [str(x).upper().strip() for x in list(cfg["symbols"]) if str(x).strip()]
@@ -268,12 +326,36 @@ def load_cfg() -> Dict[str, Any]:
     rk["eur_reserve"] = to_float(rk.get("eur_reserve"), 50.0)
     rk["dry_run"] = to_bool(rk.get("dry_run"), False)
     rk["skip_log_every_seconds"] = max(10, to_int(rk.get("skip_log_every_seconds"), 900))
+    rk["min_profit_eur"] = to_float(rk.get("min_profit_eur"), 0.30)
 
     fees["taker_fee_pct"] = to_float(fees.get("taker_fee_pct"), 0.25)
 
     lg["level"] = str(lg.get("level", "INFO")).upper()
     lg["loop_sleep_seconds"] = to_int(lg.get("loop_sleep_seconds"), 60)
     lg["candles_limit"] = to_int(lg.get("candles_limit"), 400)
+
+    tr["enable_spot"] = to_bool(tr.get("enable_spot"), True)
+    tr["enable_short_signals"] = to_bool(tr.get("enable_short_signals"), True)
+    tr["enable_auto_short"] = to_bool(tr.get("enable_auto_short"), False)
+    tr["max_total_positions"] = to_int(tr.get("max_total_positions"), rk["max_open_positions"])
+    tr["allow_long_and_short_same_symbol"] = to_bool(tr.get("allow_long_and_short_same_symbol"), False)
+
+    sh["symbols"] = [str(x).upper().strip() for x in list(sh.get("symbols", [])) if str(x).strip()]
+    sh["leverage"] = to_float(sh.get("leverage"), 2)
+    sh["margin_per_trade"] = to_float(sh.get("margin_per_trade"), 30.0)
+    sh["cooldown_minutes"] = to_int(sh.get("cooldown_minutes"), 60)
+    sh["use_sma"] = to_bool(sh.get("use_sma"), True)
+    sh["sma_fast"] = to_int(sh.get("sma_fast"), 20)
+    sh["sma_slow"] = to_int(sh.get("sma_slow"), 60)
+    sh["use_rsi"] = to_bool(sh.get("use_rsi"), True)
+    sh["rsi_len"] = to_int(sh.get("rsi_len"), 14)
+    sh["rsi_sell_max"] = to_float(sh.get("rsi_sell_max"), 40)
+    sh["use_atr"] = to_bool(sh.get("use_atr"), True)
+    sh["atr_len"] = to_int(sh.get("atr_len"), 14)
+    sh["atr_tp_mult"] = to_float(sh.get("atr_tp_mult"), 2.5)
+    sh["atr_sl_mult"] = to_float(sh.get("atr_sl_mult"), 1.2)
+    sh["use_atr_filter"] = to_bool(sh.get("use_atr_filter"), True)
+    sh["min_atr_pct"] = to_float(sh.get("min_atr_pct"), 0.35)
 
     validate_cfg(cfg)
     cfg["_cfg_path"] = str(CFG_FILE)
@@ -288,26 +370,40 @@ def load_state() -> Dict[str, Any]:
             if isinstance(st, dict):
                 st.setdefault("positions", {})
                 st.setdefault("cooldown", {})
+                st.setdefault("short_cooldown", {})
                 st.setdefault("pnl_quote", 0.0)
                 st.setdefault("trades", 0)
                 st.setdefault("wins", 0)
                 return st
         except Exception:
             pass
-    return {"positions": {}, "cooldown": {}, "pnl_quote": 0.0, "trades": 0, "wins": 0}
+    return {
+        "positions": {},
+        "cooldown": {},
+        "short_cooldown": {},
+        "pnl_quote": 0.0,
+        "trades": 0,
+        "wins": 0,
+    }
 
 def save_state(state: Dict[str, Any]):
     STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
 
 def ensure_csv_header():
-    if TX_CSV.exists():
-        return
-    cols = ["ts","market","side","price","base_amount","fees_quote","spread_pct","net_pnl_quote","holding_time_min","reason","dry_run"]
-    pd.DataFrame([], columns=cols).to_csv(TX_CSV, index=False)
+    if not TX_CSV.exists():
+        cols = ["ts","market","side","price","base_amount","fees_quote","spread_pct","net_pnl_quote","holding_time_min","reason","dry_run"]
+        pd.DataFrame([], columns=cols).to_csv(TX_CSV, index=False)
+    if not SHORT_SIGNALS_CSV.exists():
+        cols = ["ts", "market", "price", "rsi", "atr_pct", "leverage", "margin_eur", "notional_eur", "reason"]
+        pd.DataFrame([], columns=cols).to_csv(SHORT_SIGNALS_CSV, index=False)
 
 def append_tx(row: Dict[str, Any]):
     ensure_csv_header()
     pd.DataFrame([row]).to_csv(TX_CSV, index=False, mode="a", header=False)
+
+def append_short_signal(row: Dict[str, Any]):
+    ensure_csv_header()
+    pd.DataFrame([row]).to_csv(SHORT_SIGNALS_CSV, index=False, mode="a", header=False)
 
 # ------------------ Exchange ------------------
 
@@ -470,7 +566,7 @@ def scan_markets(ex, quote: str, sc: Dict[str, Any]) -> List[str]:
 
 # ------------------ Signals ------------------
 
-def compute_signal(df: pd.DataFrame, cfg: Dict[str, Any]) -> Dict[str, Any]:
+def compute_spot_signal(df: pd.DataFrame, cfg: Dict[str, Any]) -> Dict[str, Any]:
     sig = cfg["signals"]
     closes = df["close"]
 
@@ -497,8 +593,8 @@ def compute_signal(df: pd.DataFrame, cfg: Dict[str, Any]) -> Dict[str, Any]:
     trend_up = True
     trend_break = False
     if sig["use_sma"]:
-        trend_up = (last["sma_fast"] > last["sma_slow"])
-        trend_break = (last["sma_fast"] < last["sma_slow"])
+        trend_up = bool(last["sma_fast"] > last["sma_slow"])
+        trend_break = bool(last["sma_fast"] < last["sma_slow"])
 
     rsi_val = float(last["rsi"]) if sig["use_rsi"] and not math.isnan(float(last["rsi"])) else 50.0
     rsi_ok = (rsi_val >= sig["rsi_buy_min"]) if sig["use_rsi"] else True
@@ -510,14 +606,66 @@ def compute_signal(df: pd.DataFrame, cfg: Dict[str, Any]) -> Dict[str, Any]:
         atr_filter_ok = (atr_pct >= sig["min_atr_pct"])
 
     return {
-        "trend_up": bool(trend_up),
-        "trend_break": bool(trend_break),
+        "trend_up": trend_up,
+        "trend_break": trend_break,
         "rsi": float(rsi_val),
         "rsi_ok": bool(rsi_ok),
         "atr": float(atr_val),
         "atr_pct": float(atr_pct),
         "atr_filter_ok": bool(atr_filter_ok),
         "last_close": float(last_close),
+    }
+
+def compute_short_signal(df: pd.DataFrame, cfg: Dict[str, Any]) -> Dict[str, Any]:
+    sh = cfg["short"]
+    closes = df["close"]
+
+    if sh["use_sma"]:
+        df["short_sma_fast"] = sma(closes, sh["sma_fast"])
+        df["short_sma_slow"] = sma(closes, sh["sma_slow"])
+    else:
+        df["short_sma_fast"] = float("nan")
+        df["short_sma_slow"] = float("nan")
+
+    if sh["use_rsi"]:
+        df["short_rsi"] = rsi(closes, sh["rsi_len"])
+    else:
+        df["short_rsi"] = float("nan")
+
+    if sh["use_atr"] or sh["use_atr_filter"]:
+        df["short_atr"] = atr(df, sh["atr_len"])
+    else:
+        df["short_atr"] = 0.0
+
+    last = df.iloc[-1]
+    last_close = float(last["close"])
+
+    trend_down = True
+    if sh["use_sma"]:
+        trend_down = bool(last["short_sma_fast"] < last["short_sma_slow"])
+
+    rsi_val = float(last["short_rsi"]) if sh["use_rsi"] and not math.isnan(float(last["short_rsi"])) else 50.0
+    rsi_ok = (rsi_val <= sh["rsi_sell_max"]) if sh["use_rsi"] else True
+
+    atr_val = float(last.get("short_atr", 0.0)) if not math.isnan(float(last.get("short_atr", 0.0))) else 0.0
+    atr_pct = (atr_val / last_close * 100.0) if last_close > 0 else 0.0
+    atr_filter_ok = True
+    if sh["use_atr_filter"]:
+        atr_filter_ok = (atr_pct >= sh["min_atr_pct"])
+
+    tp = last_close - sh["atr_tp_mult"] * atr_val
+    sl = last_close + sh["atr_sl_mult"] * atr_val
+
+    return {
+        "trend_down": trend_down,
+        "rsi": float(rsi_val),
+        "rsi_ok": bool(rsi_ok),
+        "atr": float(atr_val),
+        "atr_pct": float(atr_pct),
+        "atr_filter_ok": bool(atr_filter_ok),
+        "last_close": float(last_close),
+        "tp_price": float(tp),
+        "sl_price": float(sl),
     }
 
 def should_buy(signal: Dict[str, Any], in_position: bool, cfg: Dict[str, Any]) -> Tuple[bool, str, str]:
@@ -532,8 +680,23 @@ def should_buy(signal: Dict[str, Any], in_position: bool, cfg: Dict[str, Any]) -
         return False, "ATR_LOW", f"SKIP ATR% {signal['atr_pct']:.3f} < {sig['min_atr_pct']}"
     return True, "BUY_OK", "BUY signal"
 
-def should_sell(signal: Dict[str, Any], pos: Dict[str, Any], cfg: Dict[str, Any], last_price: float) -> Tuple[bool, str]:
+def estimate_spot_net_pnl(pos: Dict[str, Any], exit_price: float, taker_fee_pct: float) -> float:
+    base_amount = float(pos.get("base_amount", 0.0))
+    entry_cost = float(pos.get("entry_cost_quote", 0.0))
+    entry_fee = float(pos.get("entry_fee_quote", 0.0))
+    gross_proceeds = float(base_amount * exit_price)
+    sell_fee_est = gross_proceeds * (float(taker_fee_pct) / 100.0)
+    return (gross_proceeds - entry_cost) - (entry_fee + sell_fee_est)
+
+def should_sell(
+    signal: Dict[str, Any],
+    pos: Dict[str, Any],
+    cfg: Dict[str, Any],
+    last_price: float,
+    taker_fee_pct: float
+) -> Tuple[bool, str]:
     sig = cfg["signals"]
+    rk = cfg["risk"]
     entry = float(pos["entry_price"])
 
     atr_val = float(signal.get("atr", 0.0) or 0.0)
@@ -543,13 +706,35 @@ def should_sell(signal: Dict[str, Any], pos: Dict[str, Any], cfg: Dict[str, Any]
     tp = entry + sig["atr_tp_mult"] * atr_val
     sl = entry - sig["atr_sl_mult"] * atr_val
 
-    if last_price >= tp:
-        return True, "SELL ATR_TP"
+    est_net = estimate_spot_net_pnl(pos, last_price, taker_fee_pct)
+    min_profit = float(rk.get("min_profit_eur", 0.0))
+
     if last_price <= sl:
         return True, "SELL ATR_SL"
-    if sig["exit_on_trend_break"] and signal.get("trend_break", False):
-        return True, "SELL TREND_BREAK"
+    if last_price >= tp and est_net >= min_profit:
+        return True, f"SELL ATR_TP min_profit_ok {est_net:.2f}"
+    if sig["exit_on_trend_break"] and signal.get("trend_break", False) and est_net >= min_profit:
+        return True, f"SELL TREND_BREAK min_profit_ok {est_net:.2f}"
     return False, "HOLD"
+
+def should_short_signal(
+    signal: Dict[str, Any],
+    cfg: Dict[str, Any],
+    has_spot_position: bool
+) -> Tuple[bool, str, str]:
+    sh = cfg["short"]
+    tr = cfg["trading"]
+
+    if has_spot_position and not tr["allow_long_and_short_same_symbol"]:
+        return False, "SPOT_OPEN", "SKIP short signal: spot position open"
+
+    if sh["use_sma"] and not signal["trend_down"]:
+        return False, "NO_DOWNTREND", "SKIP short signal: no downtrend"
+    if sh["use_rsi"] and not signal["rsi_ok"]:
+        return False, "RSI_HIGH", f"SKIP short signal: RSI {signal['rsi']:.1f} > {sh['rsi_sell_max']}"
+    if sh["use_atr_filter"] and not signal["atr_filter_ok"]:
+        return False, "ATR_LOW", f"SKIP short signal: ATR% {signal['atr_pct']:.3f} < {sh['min_atr_pct']}"
+    return True, "SHORT_OK", "SHORT SIGNAL"
 
 # ------------------ Orders ------------------
 
@@ -632,6 +817,8 @@ def main():
     rk = cfg["risk"]
     fees = cfg["fees"]
     lg = cfg["logging"]
+    tr = cfg["trading"]
+    sh = cfg["short"]
 
     stake = float(rk["fixed_stake_quote"])
     max_open = int(rk["max_open_positions"])
@@ -646,12 +833,17 @@ def main():
 
     LOG.info(f"Trend bot started. Config={cfg.get('_cfg_path')} DRY_RUN={dry_run}")
     LOG.info(
+        f"Trading: enable_spot={tr['enable_spot']} enable_short_signals={tr['enable_short_signals']} "
+        f"enable_auto_short={tr['enable_auto_short']} max_total_positions={tr['max_total_positions']}"
+    )
+    LOG.info(
         f"Scanner: auto_scan={sc['auto_scan']} top_n_markets={sc['top_n_markets']} "
         f"min_quote_volume={sc['min_quote_volume']}"
     )
     LOG.info(
         f"Risk: stake={stake} {quote}, max_open={max_open}, cooldown={cooldown_min}m, "
-        f"max_spread_pct={max_spread_pct}% , eur_reserve={eur_reserve} {quote}"
+        f"max_spread_pct={max_spread_pct}% , eur_reserve={eur_reserve} {quote}, "
+        f"min_profit_eur={rk['min_profit_eur']}"
     )
 
     ex = make_exchange()
@@ -661,6 +853,7 @@ def main():
     ensure_csv_header()
 
     scanned_bases = list(cfg.get("symbols", []))
+    short_bases = list(sh.get("symbols", [])) or list(cfg.get("symbols", []))
     last_scan_ts = 0.0
     scan_refresh_seconds = max(300, timeframe_to_seconds(timeframe))
 
@@ -669,11 +862,15 @@ def main():
             if sc["auto_scan"] and (time.time() - last_scan_ts >= scan_refresh_seconds or not scanned_bases):
                 try:
                     scanned_bases = scan_markets(ex, quote, sc)
+                    if not sh.get("symbols"):
+                        short_bases = list(scanned_bases)
                     last_scan_ts = time.time()
                     LOG.info(f"Scanner selected {len(scanned_bases)} markets: {', '.join(scanned_bases[:40])}")
                 except Exception as e:
                     LOG.warning(f"Scanner failed, fallback to config symbols: {e}")
                     scanned_bases = list(cfg.get("symbols", []))
+                    if not sh.get("symbols"):
+                        short_bases = list(scanned_bases)
 
             balance = safe_fetch_balance(ex, retries=5, base_sleep=1.0)
             free_quote = get_free_quote(balance, quote)
@@ -681,22 +878,25 @@ def main():
 
             state.setdefault("positions", {})
             state.setdefault("cooldown", {})
+            state.setdefault("short_cooldown", {})
 
             open_markets = list((state.get("positions", {}) or {}).keys())
             open_bases = [m.split("/")[0].upper() for m in open_markets]
 
             loop_bases = []
-            for b in scanned_bases + open_bases:
+            for b in scanned_bases + short_bases + open_bases:
                 if b not in loop_bases:
                     loop_bases.append(b)
 
             buy_allowed_bases = set(scanned_bases)
+            short_allowed_bases = set(short_bases)
 
             for base in loop_bases:
                 market = market_symbol(base, quote)
                 positions = state.get("positions", {}) or {}
                 in_pos = market in positions
                 next_ok = float((state.get("cooldown", {}) or {}).get(market, 0) or 0)
+                next_short_ok = float((state.get("short_cooldown", {}) or {}).get(market, 0) or 0)
 
                 if market not in ex.markets:
                     continue
@@ -714,132 +914,170 @@ def main():
 
                 try:
                     df = fetch_candles(ex, market, timeframe, candles_limit)
-                    s = compute_signal(df, cfg)
+                    spot_signal = compute_spot_signal(df.copy(), cfg)
+                    short_signal = compute_short_signal(df.copy(), cfg)
                 except Exception as e:
                     log_skip(market, "CANDLES_ERROR", f"SKIP candles error: {e}", skip_every)
                     continue
 
-                last_price = float(s["last_close"])
+                last_price = float(spot_signal["last_close"])
 
                 if in_pos:
                     pos = positions[market]
                     if not to_bool(pos.get("opened_by_bot", False), False):
                         continue
 
-                    do_sell, reason = should_sell(s, pos, cfg, last_price)
+                    do_sell, reason = should_sell(spot_signal, pos, cfg, last_price, taker_fee_pct)
                     if not do_sell:
-                        continue
-
-                    base_amount = float(pos["base_amount"])
-                    try:
-                        order, filled, avg, proceeds, sell_fee = place_market_sell(
-                            ex, market, base_amount, taker_fee_pct, dry_run
-                        )
-                    except Exception as e:
-                        log_skip(market, "SELL_FAILED", f"SELL failed: {e}", skip_every)
-                        continue
-
-                    entry_cost = float(pos.get("entry_cost_quote", 0.0))
-                    entry_fee = float(pos.get("entry_fee_quote", 0.0))
-                    net_pnl = (proceeds - entry_cost) - (entry_fee + sell_fee)
-
-                    hold_min = 0.0
-                    entry_ts = pos.get("entry_ts")
-                    if entry_ts:
+                        pass
+                    else:
+                        base_amount = float(pos["base_amount"])
                         try:
-                            t0 = datetime.fromisoformat(entry_ts)
-                            hold_min = (datetime.now(timezone.utc).astimezone() - t0).total_seconds() / 60.0
-                        except Exception:
-                            hold_min = 0.0
+                            order, filled, avg, proceeds, sell_fee = place_market_sell(
+                                ex, market, base_amount, taker_fee_pct, dry_run
+                            )
+                        except Exception as e:
+                            log_skip(market, "SELL_FAILED", f"SELL failed: {e}", skip_every)
+                            continue
 
-                    state["pnl_quote"] = float(state.get("pnl_quote", 0.0)) + float(net_pnl)
-                    state["trades"] = int(state.get("trades", 0)) + 1
-                    if net_pnl > 0:
-                        state["wins"] = int(state.get("wins", 0)) + 1
+                        entry_cost = float(pos.get("entry_cost_quote", 0.0))
+                        entry_fee = float(pos.get("entry_fee_quote", 0.0))
+                        net_pnl = (proceeds - entry_cost) - (entry_fee + sell_fee)
 
-                    state["cooldown"][market] = time.time() + cooldown_min * 60
-                    del state["positions"][market]
-                    save_state(state)
+                        hold_min = 0.0
+                        entry_ts = pos.get("entry_ts")
+                        if entry_ts:
+                            try:
+                                t0 = datetime.fromisoformat(entry_ts)
+                                hold_min = (datetime.now(timezone.utc).astimezone() - t0).total_seconds() / 60.0
+                            except Exception:
+                                hold_min = 0.0
 
-                    append_tx({
+                        state["pnl_quote"] = float(state.get("pnl_quote", 0.0)) + float(net_pnl)
+                        state["trades"] = int(state.get("trades", 0)) + 1
+                        if net_pnl > 0:
+                            state["wins"] = int(state.get("wins", 0)) + 1
+
+                        state["cooldown"][market] = time.time() + cooldown_min * 60
+                        del state["positions"][market]
+                        save_state(state)
+
+                        append_tx({
+                            "ts": now_iso(),
+                            "market": market,
+                            "side": "SELL",
+                            "price": avg,
+                            "base_amount": filled,
+                            "fees_quote": (entry_fee + sell_fee),
+                            "spread_pct": spr,
+                            "net_pnl_quote": net_pnl,
+                            "holding_time_min": hold_min,
+                            "reason": reason,
+                            "dry_run": dry_run,
+                        })
+
+                        winrate = (state["wins"] / state["trades"] * 100.0) if state["trades"] else 0.0
+                        LOG.info(
+                            f"{market} {reason} | PnL {quote} {fmt_eur(net_pnl)} | total {quote} {fmt_eur(state['pnl_quote'])} "
+                            f"| trades {state['trades']} winrate {winrate:.1f}% | hold {hold_min:.1f}m"
+                        )
+
+                        balance = safe_fetch_balance(ex, retries=3, base_sleep=0.8)
+                        free_quote = get_free_quote(balance, quote)
+
+                if tr["enable_spot"] and base in buy_allowed_bases and not in_pos:
+                    total_open_positions = len(state.get("positions", {}) or {})
+                    if total_open_positions >= min(max_open, tr["max_total_positions"]):
+                        log_skip(market, "MAX_OPEN", f"SKIP max_open_positions reached ({total_open_positions}/{min(max_open, tr['max_total_positions'])})", skip_every)
+                    elif time.time() < next_ok:
+                        pass
+                    elif free_quote < (stake + eur_reserve):
+                        log_skip(market, "RESERVE", f"SKIP reserve (free {fmt_eur(free_quote)} < stake+reserve {fmt_eur(stake + eur_reserve)})", skip_every)
+                    else:
+                        ok, reason_key, reason_msg = should_buy(spot_signal, False, cfg)
+                        if not ok:
+                            log_skip(market, reason_key, reason_msg, skip_every)
+                        else:
+                            try:
+                                order, filled, avg, cost, buy_fee = place_market_buy(
+                                    ex, market, stake, taker_fee_pct, dry_run
+                                )
+                            except Exception as e:
+                                log_skip(market, "BUY_FAILED", f"BUY failed: {e}", skip_every)
+                            else:
+                                state["positions"][market] = {
+                                    "opened_by_bot": True,
+                                    "base_amount": filled,
+                                    "entry_price": avg,
+                                    "entry_ts": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+                                    "entry_cost_quote": cost,
+                                    "entry_fee_quote": buy_fee,
+                                }
+                                save_state(state)
+
+                                append_tx({
+                                    "ts": now_iso(),
+                                    "market": market,
+                                    "side": "BUY",
+                                    "price": avg,
+                                    "base_amount": filled,
+                                    "fees_quote": buy_fee,
+                                    "spread_pct": spr,
+                                    "net_pnl_quote": 0.0,
+                                    "holding_time_min": 0.0,
+                                    "reason": reason_msg,
+                                    "dry_run": dry_run,
+                                })
+
+                                LOG.info(f"{market} BUY | stake {quote} {fmt_eur(stake)} @ {avg:.8f} | spread {spr:.3f}%")
+
+                                balance = safe_fetch_balance(ex, retries=3, base_sleep=0.8)
+                                free_quote = get_free_quote(balance, quote)
+
+                if tr["enable_short_signals"] and base in short_allowed_bases:
+                    if time.time() < next_short_ok:
+                        continue
+
+                    has_spot_position = market in (state.get("positions", {}) or {})
+                    ok, reason_key, reason_msg = should_short_signal(short_signal, cfg, has_spot_position)
+                    if not ok:
+                        log_skip(market, f"SHORT_{reason_key}", reason_msg, skip_every)
+                        continue
+
+                    if tr["enable_auto_short"]:
+                        log_skip(
+                            market,
+                            "SHORT_AUTO_DISABLED",
+                            "AUTO SHORT requested but not implemented in this script. Signal logged only.",
+                            skip_every,
+                        )
+
+                    leverage = float(sh["leverage"])
+                    margin_per_trade = float(sh["margin_per_trade"])
+                    notional = margin_per_trade * leverage
+
+                    append_short_signal({
                         "ts": now_iso(),
                         "market": market,
-                        "side": "SELL",
-                        "price": avg,
-                        "base_amount": filled,
-                        "fees_quote": (entry_fee + sell_fee),
-                        "spread_pct": spr,
-                        "net_pnl_quote": net_pnl,
-                        "holding_time_min": hold_min,
-                        "reason": reason,
-                        "dry_run": dry_run,
+                        "price": short_signal["last_close"],
+                        "rsi": short_signal["rsi"],
+                        "atr_pct": short_signal["atr_pct"],
+                        "leverage": leverage,
+                        "margin_eur": margin_per_trade,
+                        "notional_eur": notional,
+                        "reason": reason_msg,
                     })
 
-                    winrate = (state["wins"] / state["trades"] * 100.0) if state["trades"] else 0.0
+                    state["short_cooldown"][market] = time.time() + int(sh["cooldown_minutes"]) * 60
+                    save_state(state)
+
                     LOG.info(
-                        f"{market} {reason} | PnL {quote} {fmt_eur(net_pnl)} | total {quote} {fmt_eur(state['pnl_quote'])} "
-                        f"| trades {state['trades']} winrate {winrate:.1f}% | hold {hold_min:.1f}m"
+                        f"{market} SHORT SIGNAL | price {short_signal['last_close']:.8f} | "
+                        f"RSI {short_signal['rsi']:.1f} | ATR% {short_signal['atr_pct']:.3f} | "
+                        f"tp {short_signal['tp_price']:.8f} | sl {short_signal['sl_price']:.8f} | "
+                        f"lev x{leverage:g} | margin {quote} {fmt_eur(margin_per_trade)} | "
+                        f"notional {quote} {fmt_eur(notional)}"
                     )
-
-                    balance = safe_fetch_balance(ex, retries=3, base_sleep=0.8)
-                    free_quote = get_free_quote(balance, quote)
-                    continue
-
-                if base not in buy_allowed_bases:
-                    continue
-
-                if len(state.get("positions", {}) or {}) >= max_open:
-                    log_skip(market, "MAX_OPEN", f"SKIP max_open_positions reached ({len(state.get('positions', {}) or {})}/{max_open})", skip_every)
-                    continue
-
-                if time.time() < next_ok:
-                    continue
-
-                if free_quote < (stake + eur_reserve):
-                    log_skip(market, "RESERVE", f"SKIP reserve (free {fmt_eur(free_quote)} < stake+reserve {fmt_eur(stake + eur_reserve)})", skip_every)
-                    continue
-
-                ok, reason_key, reason_msg = should_buy(s, False, cfg)
-                if not ok:
-                    log_skip(market, reason_key, reason_msg, skip_every)
-                    continue
-
-                try:
-                    order, filled, avg, cost, buy_fee = place_market_buy(
-                        ex, market, stake, taker_fee_pct, dry_run
-                    )
-                except Exception as e:
-                    log_skip(market, "BUY_FAILED", f"BUY failed: {e}", skip_every)
-                    continue
-
-                state["positions"][market] = {
-                    "opened_by_bot": True,
-                    "base_amount": filled,
-                    "entry_price": avg,
-                    "entry_ts": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
-                    "entry_cost_quote": cost,
-                    "entry_fee_quote": buy_fee,
-                }
-                save_state(state)
-
-                append_tx({
-                    "ts": now_iso(),
-                    "market": market,
-                    "side": "BUY",
-                    "price": avg,
-                    "base_amount": filled,
-                    "fees_quote": buy_fee,
-                    "spread_pct": spr,
-                    "net_pnl_quote": 0.0,
-                    "holding_time_min": 0.0,
-                    "reason": reason_msg,
-                    "dry_run": dry_run,
-                })
-
-                LOG.info(f"{market} BUY | stake {quote} {fmt_eur(stake)} @ {avg:.8f} | spread {spr:.3f}%")
-
-                balance = safe_fetch_balance(ex, retries=3, base_sleep=0.8)
-                free_quote = get_free_quote(balance, quote)
 
             time.sleep(sleep_s)
 
