@@ -39,7 +39,7 @@ risk:
   max_spread_pct: 0.20
   eur_reserve: 50
   skip_log_every_seconds: 900
-  min_profit_eur: 0.50
+  
 
 fees:
   taker_fee_pct: 0.25
