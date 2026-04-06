@@ -1,17 +1,17 @@
 quote: EUR
-symbols: [BTC, ETH, XRP, SOL, TAO]
+symbols: [BTC, ETH, SOL, XRP]
 timeframe: "15m"
 
 trading:
   enable_spot: true
   enable_short_signals: true
   enable_auto_short: false
-  max_total_positions: 5
+  max_total_positions: 2
   allow_long_and_short_same_symbol: false
 
 scanner:
   auto_scan: false
-  top_n_markets: 5
+  top_n_markets: 4
   min_quote_volume: 0
   exclude_bases:
     - EUR
@@ -22,31 +22,27 @@ signals:
   use_sma: true
   sma_fast: 20
   sma_slow: 60
-
   use_rsi: true
   rsi_len: 14
-  rsi_buy_min: 60
-
+  rsi_buy_min: 65
   use_atr: true
   atr_len: 14
-  atr_tp_mult: 3.0
+  atr_tp_mult: 2.4
   atr_sl_mult: 1.2
-
-  exit_on_trend_break: false
-
+  exit_on_trend_break: true
   use_atr_filter: true
-  min_atr_pct: 0.35
+  min_atr_pct: 0.40
 
 risk:
-  dry_run: false
-  fixed_stake_quote: 30
-  max_open_positions: 5
+  dry_run: true
+  fixed_stake_quote: 20
+  max_open_positions: 2
   only_buy_if_not_in_position: true
-  cooldown_minutes: 60
-  max_spread_pct: 0.20
-  eur_reserve: 50
+  cooldown_minutes: 180
+  max_spread_pct: 0.15
+  eur_reserve: 100
   skip_log_every_seconds: 900
-  min_profit_eur: 0.30
+  min_profit_eur: 0.40
 
 fees:
   taker_fee_pct: 0.25
@@ -57,23 +53,19 @@ logging:
   candles_limit: 400
 
 short:
-  symbols: [BTC, ETH, XRP, SOL, TAO]
+  symbols: [BTC, ETH, SOL, XRP]
   leverage: 2
-  margin_per_trade: 30
-  cooldown_minutes: 60
-
+  margin_per_trade: 15
+  cooldown_minutes: 180
   use_sma: true
   sma_fast: 20
   sma_slow: 60
-
   use_rsi: true
   rsi_len: 14
-  rsi_sell_max: 40
-
+  rsi_sell_max: 38
   use_atr: true
   atr_len: 14
-  atr_tp_mult: 2.5
-  atr_sl_mult: 1.2
-
+  atr_tp_mult: 2.2
+  atr_sl_mult: 1.1
   use_atr_filter: true
-  min_atr_pct: 0.35
+  min_atr_pct: 0.40
