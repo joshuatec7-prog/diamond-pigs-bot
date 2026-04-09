@@ -3,8 +3,12 @@ cd /opt/render/project/src || exit 1
 cp -f config.yaml "config.yaml.bad.$(date +%Y%m%d_%H%M%S)" 2>/dev/null || true
 cp -f state.json "state.json.bad.$(date +%Y%m%d_%H%M%S)" 2>/dev/null || true
 
-cat > config.yaml <<'YAML'
-quote: EUR
+rm -f config.yaml
+
+python - <<'PY'
+from pathlib import Path
+
+cfg = """quote: EUR
 symbols:
   - BTC
   - ETH
@@ -83,15 +87,24 @@ short:
   atr_sl_mult: 1.1
   use_atr_filter: true
   min_atr_pct: 0.30
-YAML
+"""
+Path("config.yaml").write_text(cfg, encoding="utf-8", newline="\n")
+print("config.yaml opnieuw geschreven")
+PY
 
 python - <<'PY'
-import yaml, json
+import yaml
 from pathlib import Path
 
-cfg = yaml.safe_load(Path("config.yaml").read_text(encoding="utf-8"))
+txt = Path("config.yaml").read_text(encoding="utf-8")
+cfg = yaml.safe_load(txt)
 print("config.yaml OK")
-print(json.dumps(cfg, indent=2, ensure_ascii=False))
+for i, line in enumerate(txt.splitlines(), start=1):
+    if i > 20:
+        break
+    print(f"{i:>3}: {line}")
+print("dry_run =", cfg["risk"]["dry_run"])
+print("eur_reserve =", cfg["risk"]["eur_reserve"])
 PY
 
 python - <<'PY'
@@ -135,4 +148,4 @@ else:
     print("diamond_bot.py niet gevonden")
 PY
 
-echo "KLAAR"
+echo "KLAAR - nu service herstarten"
