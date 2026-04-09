@@ -3,7 +3,8 @@
 # - Spot trading live
 # - Short logic as signal-only by default
 # - Eén scanner, één state.json, één logica
-# - Verkoopt nooit handmatige coins, alleen bot-posities uit state.json
+# - Beschermt handmatige coins via manual baseline lock
+# - Verkoopt alleen bot-posities boven de handmatige baseline
 
 import os
 import time
@@ -250,8 +251,8 @@ def load_cfg() -> Dict[str, Any]:
     sig.setdefault("rsi_buy_min", 58)
     sig.setdefault("use_atr", True)
     sig.setdefault("atr_len", 14)
-    sig.setdefault("atr_tp_mult", 2.2)
-    sig.setdefault("atr_sl_mult", 1.8)
+    sig.setdefault("atr_tp_mult", 2.4)
+    sig.setdefault("atr_sl_mult", 1.3)
     sig.setdefault("exit_on_trend_break", True)
     sig.setdefault("use_atr_filter", True)
     sig.setdefault("min_atr_pct", 0.30)
@@ -260,11 +261,11 @@ def load_cfg() -> Dict[str, Any]:
     rk.setdefault("max_open_positions", 5)
     rk.setdefault("only_buy_if_not_in_position", True)
     rk.setdefault("cooldown_minutes", 45)
-    rk.setdefault("max_spread_pct", 0.35)
-    rk.setdefault("eur_reserve", 50.0)
+    rk.setdefault("max_spread_pct", 0.20)
+    rk.setdefault("eur_reserve", 55.0)
     rk.setdefault("dry_run", False)
-    rk.setdefault("skip_log_every_seconds", 900)
-    rk.setdefault("min_profit_eur", 0.30)
+    rk.setdefault("skip_log_every_seconds", 300)
+    rk.setdefault("min_profit_eur", 0.20)
 
     fees.setdefault("taker_fee_pct", 0.25)
 
@@ -290,10 +291,10 @@ def load_cfg() -> Dict[str, Any]:
     sh.setdefault("rsi_sell_max", 40)
     sh.setdefault("use_atr", True)
     sh.setdefault("atr_len", 14)
-    sh.setdefault("atr_tp_mult", 2.5)
-    sh.setdefault("atr_sl_mult", 1.2)
+    sh.setdefault("atr_tp_mult", 2.3)
+    sh.setdefault("atr_sl_mult", 1.1)
     sh.setdefault("use_atr_filter", True)
-    sh.setdefault("min_atr_pct", 0.35)
+    sh.setdefault("min_atr_pct", 0.30)
 
     cfg["quote"] = str(cfg["quote"]).upper().strip()
     cfg["symbols"] = [str(x).upper().strip() for x in list(cfg["symbols"]) if str(x).strip()]
@@ -312,8 +313,8 @@ def load_cfg() -> Dict[str, Any]:
     sig["rsi_buy_min"] = to_float(sig.get("rsi_buy_min"), 58)
     sig["use_atr"] = to_bool(sig.get("use_atr"), True)
     sig["atr_len"] = to_int(sig.get("atr_len"), 14)
-    sig["atr_tp_mult"] = to_float(sig.get("atr_tp_mult"), 2.2)
-    sig["atr_sl_mult"] = to_float(sig.get("atr_sl_mult"), 1.8)
+    sig["atr_tp_mult"] = to_float(sig.get("atr_tp_mult"), 2.4)
+    sig["atr_sl_mult"] = to_float(sig.get("atr_sl_mult"), 1.3)
     sig["exit_on_trend_break"] = to_bool(sig.get("exit_on_trend_break"), True)
     sig["use_atr_filter"] = to_bool(sig.get("use_atr_filter"), True)
     sig["min_atr_pct"] = to_float(sig.get("min_atr_pct"), 0.30)
@@ -322,11 +323,11 @@ def load_cfg() -> Dict[str, Any]:
     rk["max_open_positions"] = to_int(rk.get("max_open_positions"), 5)
     rk["only_buy_if_not_in_position"] = to_bool(rk.get("only_buy_if_not_in_position"), True)
     rk["cooldown_minutes"] = to_int(rk.get("cooldown_minutes"), 45)
-    rk["max_spread_pct"] = to_float(rk.get("max_spread_pct"), 0.35)
-    rk["eur_reserve"] = to_float(rk.get("eur_reserve"), 50.0)
+    rk["max_spread_pct"] = to_float(rk.get("max_spread_pct"), 0.20)
+    rk["eur_reserve"] = to_float(rk.get("eur_reserve"), 55.0)
     rk["dry_run"] = to_bool(rk.get("dry_run"), False)
-    rk["skip_log_every_seconds"] = max(10, to_int(rk.get("skip_log_every_seconds"), 900))
-    rk["min_profit_eur"] = to_float(rk.get("min_profit_eur"), 0.30)
+    rk["skip_log_every_seconds"] = max(10, to_int(rk.get("skip_log_every_seconds"), 300))
+    rk["min_profit_eur"] = to_float(rk.get("min_profit_eur"), 0.20)
 
     fees["taker_fee_pct"] = to_float(fees.get("taker_fee_pct"), 0.25)
 
@@ -352,10 +353,10 @@ def load_cfg() -> Dict[str, Any]:
     sh["rsi_sell_max"] = to_float(sh.get("rsi_sell_max"), 40)
     sh["use_atr"] = to_bool(sh.get("use_atr"), True)
     sh["atr_len"] = to_int(sh.get("atr_len"), 14)
-    sh["atr_tp_mult"] = to_float(sh.get("atr_tp_mult"), 2.5)
-    sh["atr_sl_mult"] = to_float(sh.get("atr_sl_mult"), 1.2)
+    sh["atr_tp_mult"] = to_float(sh.get("atr_tp_mult"), 2.3)
+    sh["atr_sl_mult"] = to_float(sh.get("atr_sl_mult"), 1.1)
     sh["use_atr_filter"] = to_bool(sh.get("use_atr_filter"), True)
-    sh["min_atr_pct"] = to_float(sh.get("min_atr_pct"), 0.35)
+    sh["min_atr_pct"] = to_float(sh.get("min_atr_pct"), 0.30)
 
     validate_cfg(cfg)
     cfg["_cfg_path"] = str(CFG_FILE)
@@ -371,6 +372,7 @@ def load_state() -> Dict[str, Any]:
                 st.setdefault("positions", {})
                 st.setdefault("cooldown", {})
                 st.setdefault("short_cooldown", {})
+                st.setdefault("manual_baseline", {})
                 st.setdefault("pnl_quote", 0.0)
                 st.setdefault("trades", 0)
                 st.setdefault("wins", 0)
@@ -381,6 +383,7 @@ def load_state() -> Dict[str, Any]:
         "positions": {},
         "cooldown": {},
         "short_cooldown": {},
+        "manual_baseline": {},
         "pnl_quote": 0.0,
         "trades": 0,
         "wins": 0,
@@ -446,6 +449,41 @@ def get_free_quote(balance: Dict[str, Any], quote: str) -> float:
         return float((balance.get("free", {}) or {}).get(quote, 0.0) or 0.0)
     except Exception:
         return 0.0
+
+def get_total_asset(balance: Dict[str, Any], asset: str) -> float:
+    try:
+        return float((balance.get("total", {}) or {}).get(asset, 0.0) or 0.0)
+    except Exception:
+        return 0.0
+
+def tracked_bot_amount_for_base(state: Dict[str, Any], base: str, quote: str) -> float:
+    market = f"{base}/{quote}"
+    pos = (state.get("positions", {}) or {}).get(market)
+    if not pos:
+        return 0.0
+    if not to_bool(pos.get("opened_by_bot", False), False):
+        return 0.0
+    return float(pos.get("base_amount", 0.0) or 0.0)
+
+def ensure_manual_baselines(state: Dict[str, Any], balance: Dict[str, Any], bases: List[str], quote: str) -> bool:
+    mb = state.setdefault("manual_baseline", {})
+    changed = False
+
+    for base in bases:
+        base = str(base).upper().strip()
+        if not base or base == quote:
+            continue
+        if base in mb:
+            continue
+
+        total_amt = get_total_asset(balance, base)
+        bot_amt = tracked_bot_amount_for_base(state, base, quote)
+        baseline = max(0.0, total_amt - bot_amt)
+        mb[base] = baseline
+        changed = True
+        LOG.info(f"{base} manual baseline locked at {baseline:.12f}")
+
+    return changed
 
 # ------------------ Market helpers ------------------
 
@@ -713,8 +751,8 @@ def should_sell(
         return True, "SELL ATR_SL"
     if last_price >= tp and est_net >= min_profit:
         return True, f"SELL ATR_TP min_profit_ok {est_net:.2f}"
-    if sig["exit_on_trend_break"] and signal.get("trend_break", False) and est_net >= min_profit:
-        return True, f"SELL TREND_BREAK min_profit_ok {est_net:.2f}"
+    if sig["exit_on_trend_break"] and signal.get("trend_break", False) and est_net > 0:
+        return True, f"SELL TREND_BREAK net_positive {est_net:.2f}"
     return False, "HOLD"
 
 def should_short_signal(
@@ -879,6 +917,21 @@ def main():
             state.setdefault("positions", {})
             state.setdefault("cooldown", {})
             state.setdefault("short_cooldown", {})
+            state.setdefault("manual_baseline", {})
+
+            baseline_bases = []
+            for b in list(cfg.get("symbols", [])) + list(sh.get("symbols", [])):
+                b = str(b).upper().strip()
+                if b and b != quote and b not in baseline_bases:
+                    baseline_bases.append(b)
+
+            for m in (state.get("positions", {}) or {}).keys():
+                b = str(m).split("/")[0].upper().strip()
+                if b and b != quote and b not in baseline_bases:
+                    baseline_bases.append(b)
+
+            if ensure_manual_baselines(state, balance, baseline_bases, quote):
+                save_state(state)
 
             open_markets = list((state.get("positions", {}) or {}).keys())
             open_bases = [m.split("/")[0].upper() for m in open_markets]
@@ -928,10 +981,23 @@ def main():
                         continue
 
                     do_sell, reason = should_sell(spot_signal, pos, cfg, last_price, taker_fee_pct)
-                    if not do_sell:
-                        pass
-                    else:
+                    if do_sell:
                         base_amount = float(pos["base_amount"])
+
+                        base_asset = market.split("/")[0].upper()
+                        baseline = float((state.get("manual_baseline", {}) or {}).get(base_asset, 0.0) or 0.0)
+                        total_base = get_total_asset(balance, base_asset)
+                        bot_available = max(0.0, total_base - baseline)
+
+                        if bot_available + 1e-12 < base_amount:
+                            log_skip(
+                                market,
+                                "BASELINE_LOCK",
+                                f"SELL blocked by baseline lock: total {total_base:.12f}, baseline {baseline:.12f}, bot_available {bot_available:.12f}, need {base_amount:.12f}",
+                                skip_every,
+                            )
+                            continue
+
                         try:
                             order, filled, avg, proceeds, sell_fee = place_market_sell(
                                 ex, market, base_amount, taker_fee_pct, dry_run
