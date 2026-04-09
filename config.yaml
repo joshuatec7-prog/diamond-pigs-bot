@@ -1,9 +1,15 @@
-cp -n config.yaml config.yaml.bak 2>/dev/null || true
-cp -n state.json state.json.bak 2>/dev/null || true
+cd /opt/render/project/src || exit 1
+
+cp -f config.yaml "config.yaml.bad.$(date +%Y%m%d_%H%M%S)" 2>/dev/null || true
+cp -f state.json "state.json.bad.$(date +%Y%m%d_%H%M%S)" 2>/dev/null || true
 
 cat > config.yaml <<'YAML'
 quote: EUR
-symbols: [BTC, ETH, SOL, XRP]
+symbols:
+  - BTC
+  - ETH
+  - SOL
+  - XRP
 timeframe: "15m"
 
 trading:
@@ -57,7 +63,11 @@ logging:
   candles_limit: 400
 
 short:
-  symbols: [BTC, ETH, SOL, XRP]
+  symbols:
+    - BTC
+    - ETH
+    - SOL
+    - XRP
   leverage: 2
   margin_per_trade: 15
   cooldown_minutes: 180
@@ -76,21 +86,12 @@ short:
 YAML
 
 python - <<'PY'
+import yaml, json
 from pathlib import Path
 
-old = '''    if sig["exit_on_trend_break"] and signal.get("trend_break", False) and est_net >= min_profit:
-        return True, f"SELL TREND_BREAK min_profit_ok {est_net:.2f}"'''
-new = '''    if sig["exit_on_trend_break"] and signal.get("trend_break", False) and est_net > 0:
-        return True, f"SELL TREND_BREAK net_positive {est_net:.2f}"'''
-
-patched = []
-for p in Path(".").glob("*.py"):
-    txt = p.read_text(encoding="utf-8", errors="ignore")
-    if old in txt:
-        p.write_text(txt.replace(old, new), encoding="utf-8")
-        patched.append(str(p))
-
-print("patched:", patched if patched else "geen .py bestand met exact match gevonden")
+cfg = yaml.safe_load(Path("config.yaml").read_text(encoding="utf-8"))
+print("config.yaml OK")
+print(json.dumps(cfg, indent=2, ensure_ascii=False))
 PY
 
 python - <<'PY'
@@ -114,4 +115,24 @@ p.write_text(json.dumps(s, indent=2, ensure_ascii=False), encoding="utf-8")
 print("state.json opgeschoond")
 PY
 
-echo "Klaar. Start nu je bot opnieuw."
+python - <<'PY'
+from pathlib import Path
+
+old = '''    if sig["exit_on_trend_break"] and signal.get("trend_break", False) and est_net >= min_profit:
+        return True, f"SELL TREND_BREAK min_profit_ok {est_net:.2f}"'''
+new = '''    if sig["exit_on_trend_break"] and signal.get("trend_break", False) and est_net > 0:
+        return True, f"SELL TREND_BREAK net_positive {est_net:.2f}"'''
+
+p = Path("diamond_bot.py")
+if p.exists():
+    txt = p.read_text(encoding="utf-8", errors="ignore")
+    if old in txt:
+        p.write_text(txt.replace(old, new), encoding="utf-8")
+        print("diamond_bot.py gepatcht")
+    else:
+        print("diamond_bot.py al gepatcht of regel niet gevonden")
+else:
+    print("diamond_bot.py niet gevonden")
+PY
+
+echo "KLAAR"
