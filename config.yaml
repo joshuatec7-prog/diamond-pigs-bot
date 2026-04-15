@@ -4,7 +4,7 @@ timeframe: "15m"
 
 trading:
   enable_spot: true
-  enable_short_signals: true
+  enable_short_signals: false
   enable_auto_short: false
   max_total_positions: 5
   allow_long_and_short_same_symbol: false
@@ -56,24 +56,6 @@ logging:
   loop_sleep_seconds: 60
   candles_limit: 400
 
-short:
-  symbols: [BTC, ETH, XRP, SOL, ADA]
-  leverage: 2
-  margin_per_trade: 30
-  cooldown_minutes: 60
-
-  use_sma: true
-  sma_fast: 20
-  sma_slow: 60
-
-  use_rsi: true
-  rsi_len: 14
-  rsi_sell_max: 40
-
-  use_atr: true
-  atr_len: 14
-  atr_tp_mult: 2.3
-  atr_sl_mult: 1.1
-
-  use_atr_filter: true
-  min_atr_pct: 0.30
+files:
+  state_file: state.json
+  trades_file: transactions.csv
