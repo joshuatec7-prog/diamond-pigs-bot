@@ -39,8 +39,8 @@ signals:
 
 risk:
   dry_run: false
-  fixed_stake_quote: 30
-  max_open_positions: 5
+  fixed_stake_quote: 50
+  max_open_positions: 7
   only_buy_if_not_in_position: true
   cooldown_minutes: 45
   max_spread_pct: 0.20
