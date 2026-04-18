@@ -45,7 +45,7 @@ risk:
   cooldown_minutes: 45
   max_spread_pct: 0.20
   eur_reserve: 55
-  skip_log_every_seconds: 300
+  skip_log_every_seconds: 600
   min_profit_eur: 0.20
 
 fees:
