@@ -66,14 +66,19 @@ def setup_logging(level: str = "INFO") -> None:
 def load_state(path_str: str) -> Dict[str, Any]:
     p = Path(path_str)
     if not p.exists():
-        return {"positions": {}, "cooldown": {}, "pnl_quote": 0.0, "trades": 0, "wins": 0}
+        return {"positions": {}, "cooldown": {}, "short_positions": {}, "short_cooldown": {}, "pnl_quote": 0.0, "short_pnl_quote": 0.0, "trades": 0, "wins": 0, "short_trades": 0, "short_wins": 0}
     with open(p, "r", encoding="utf-8") as f:
         data = json.load(f)
     data.setdefault("positions", {})
     data.setdefault("cooldown", {})
+    data.setdefault("short_positions", {})
+    data.setdefault("short_cooldown", {})
     data.setdefault("pnl_quote", 0.0)
+    data.setdefault("short_pnl_quote", 0.0)
     data.setdefault("trades", 0)
     data.setdefault("wins", 0)
+    data.setdefault("short_trades", 0)
+    data.setdefault("short_wins", 0)
     return data
 
 
@@ -211,6 +216,7 @@ class Bot:
         self.state_file = str(files.get("state_file", "state.json"))
         self.trades_file = str(files.get("trades_file", "transactions.csv"))
         self.state = load_state(self.state_file)
+        self.last_status_log_ts = 0.0
 
         load_dotenv()
         api_key = os.getenv("BITVAVO_API_KEY", "")
@@ -341,11 +347,261 @@ class Bot:
     def open_positions_count(self) -> int:
         return len(self.state.get("positions", {}))
 
+    def short_positions_count(self) -> int:
+        return len(self.state.get("short_positions", {}))
+
     def bot_invested_quote(self) -> float:
         total = 0.0
         for pos in self.state.get("positions", {}).values():
             total += to_float(pos.get("quote_amount"), 0.0)
         return total
+
+    def short_enabled(self) -> bool:
+        return to_bool(get_cfg(self.cfg, "trading.enable_short_signals", False), False)
+
+    def allow_long_and_short_same_symbol(self) -> bool:
+        return to_bool(get_cfg(self.cfg, "trading.allow_long_and_short_same_symbol", False), False)
+
+    def short_symbol_in_cooldown(self, symbol: str) -> bool:
+        cd = self.state.get("short_cooldown", {}).get(symbol)
+        if not cd:
+            return False
+        cooldown_minutes = to_float(get_cfg(self.cfg, "short.cooldown_minutes", 60), 60.0)
+        return minutes_since(float(cd)) < cooldown_minutes
+
+    def short_entry_signal(self, symbol: str) -> Optional[Dict[str, Any]]:
+        df = self.fetch_ohlcv_df(symbol)
+        df = enrich_indicators(
+            df,
+            sma_fast=int(get_cfg(self.cfg, "short.sma_fast", 20)),
+            sma_slow=int(get_cfg(self.cfg, "short.sma_slow", 60)),
+            rsi_len=int(get_cfg(self.cfg, "short.rsi_len", 14)),
+            atr_len=int(get_cfg(self.cfg, "short.atr_len", 14)),
+        )
+        if len(df) < max(int(get_cfg(self.cfg, "short.sma_slow", 60)) + 2, 80):
+            return None
+
+        last = df.iloc[-1]
+        prev = df.iloc[-2]
+
+        fast_now = to_float(last["sma_fast"], 0.0)
+        slow_now = to_float(last["sma_slow"], 0.0)
+        fast_prev = to_float(prev["sma_fast"], 0.0)
+        slow_prev = to_float(prev["sma_slow"], 0.0)
+        close_now = to_float(last["close"], 0.0)
+        rsi_now = to_float(last["rsi"], 50.0)
+        atr_now = to_float(last["atr"], 0.0)
+        atr_pct = to_float(last["atr_pct"], 0.0)
+
+        cross_down = fast_prev >= slow_prev and fast_now < slow_now
+        trend_ok = fast_now < slow_now and close_now < fast_now
+        momentum_ok = rsi_now <= to_float(get_cfg(self.cfg, "short.rsi_sell_max", 40), 40.0)
+        volatility_ok = atr_pct >= to_float(get_cfg(self.cfg, "short.min_atr_pct", 0.30), 0.30)
+
+        if cross_down and trend_ok and momentum_ok and volatility_ok and atr_now > 0:
+            tp_mult = to_float(get_cfg(self.cfg, "short.atr_tp_mult", 2.3), 2.3)
+            sl_mult = to_float(get_cfg(self.cfg, "short.atr_sl_mult", 1.1), 1.1)
+            return {
+                "close": close_now,
+                "atr": atr_now,
+                "rsi": rsi_now,
+                "atr_pct": atr_pct,
+                "stop_loss": close_now + atr_now * sl_mult,
+                "take_profit": close_now - atr_now * tp_mult,
+            }
+        return None
+
+    def short_exit_signal(self, symbol: str, position: Dict[str, Any]) -> Optional[str]:
+        df = self.fetch_ohlcv_df(symbol)
+        df = enrich_indicators(
+            df,
+            sma_fast=int(get_cfg(self.cfg, "short.sma_fast", 20)),
+            sma_slow=int(get_cfg(self.cfg, "short.sma_slow", 60)),
+            rsi_len=int(get_cfg(self.cfg, "short.rsi_len", 14)),
+            atr_len=int(get_cfg(self.cfg, "short.atr_len", 14)),
+        )
+        last = df.iloc[-1]
+        price = to_float(last["close"], 0.0)
+        fast = to_float(last["sma_fast"], 0.0)
+        slow = to_float(last["sma_slow"], 0.0)
+        stop_loss = to_float(position.get("stop_loss"), 0.0)
+        take_profit = to_float(position.get("take_profit"), 0.0)
+
+        if stop_loss > 0 and price >= stop_loss:
+            return "short_stop_loss"
+        if take_profit > 0 and price <= take_profit:
+            return "short_take_profit"
+        if to_bool(get_cfg(self.cfg, "signals.exit_on_trend_break", True), True) and fast > slow:
+            return "short_trend_break"
+        return None
+
+    def estimated_short_exit_pnl_quote(self, symbol: str, position: Dict[str, Any], ask_price: Optional[float] = None) -> float:
+        if ask_price is None:
+            ticker = self.get_ticker(symbol)
+            ask_price = to_float(ticker.get("ask"), 0.0)
+        amount = to_float(position.get("amount"), 0.0)
+        cover_quote = amount * max(ask_price or 0.0, 0.0)
+        taker_fee_pct = to_float(get_cfg(self.cfg, "risk.taker_fee_pct", 0.25), 0.25)
+        est_cover_fee = cover_quote * (taker_fee_pct / 100.0)
+        entry_quote = to_float(position.get("quote_amount"), 0.0)
+        fee_open_quote = to_float(position.get("fees_open_quote"), 0.0)
+        return entry_quote - fee_open_quote - cover_quote - est_cover_fee
+
+    def close_short_allowed_by_profit(self, symbol: str, position: Dict[str, Any], reason: str) -> bool:
+        if reason == "short_stop_loss":
+            return True
+
+        min_profit_eur = to_float(get_cfg(self.cfg, "risk.min_profit_eur", 0.0), 0.0)
+        if min_profit_eur <= 0:
+            return True
+
+        ticker = self.get_ticker(symbol)
+        ask = to_float(ticker.get("ask"), 0.0)
+        if ask <= 0:
+            return False
+
+        est_pnl = self.estimated_short_exit_pnl_quote(symbol, position, ask)
+        if est_pnl >= min_profit_eur:
+            return True
+
+        LOG.info(
+            "HOLD SHORT %s | reason=%s | est_pnl=%.4f %s < min_profit=%.4f %s",
+            symbol,
+            reason,
+            est_pnl,
+            self.quote,
+            min_profit_eur,
+            self.quote,
+        )
+        return False
+
+    def open_paper_short(self, symbol: str, signal: Dict[str, Any]) -> None:
+        ticker = self.get_ticker(symbol)
+        bid = to_float(ticker.get("bid"), 0.0)
+        if bid <= 0:
+            return
+        leverage = max(1.0, to_float(get_cfg(self.cfg, "short.leverage", 1), 1.0))
+        margin_per_trade = to_float(get_cfg(self.cfg, "short.margin_per_trade", 30), 30.0)
+        quote_amount = margin_per_trade * leverage
+        amount = self.amount_to_precision_safe(symbol, quote_amount / bid)
+        quote_amount = amount * bid
+        fee_open_quote = quote_amount * (to_float(get_cfg(self.cfg, "risk.taker_fee_pct", 0.25), 0.25) / 100.0)
+
+        self.state["short_positions"][symbol] = {
+            "paper_only": True,
+            "opened_at": utc_now_ts(),
+            "entry_price": bid,
+            "amount": amount,
+            "margin_quote": margin_per_trade,
+            "leverage": leverage,
+            "quote_amount": quote_amount,
+            "fees_open_quote": fee_open_quote,
+            "stop_loss": signal["stop_loss"],
+            "take_profit": signal["take_profit"],
+        }
+        save_state(self.state_file, self.state)
+
+        append_trade_csv(
+            self.trades_file,
+            {
+                "ts": now_iso(),
+                "market": symbol,
+                "side": "SHORT_OPEN",
+                "price": round(bid, 12),
+                "base_amount": amount,
+                "quote_amount": round(quote_amount, 8),
+                "fees_quote": round(fee_open_quote, 8),
+                "spread_pct": round(self.estimate_spread_pct(ticker), 6),
+                "net_pnl_quote": "",
+                "holding_time_min": "",
+                "reason": "paper_short_entry",
+                "dry_run": True,
+            },
+        )
+        LOG.info(
+            "PAPER SHORT OPEN %s | price=%.8f amount=%s notional=%.2f %s lev=%.2f",
+            symbol,
+            bid,
+            amount,
+            quote_amount,
+            self.quote,
+            leverage,
+        )
+
+    def close_paper_short(self, symbol: str, position: Dict[str, Any], reason: str) -> None:
+        ticker = self.get_ticker(symbol)
+        ask = to_float(ticker.get("ask"), 0.0)
+        if ask <= 0:
+            return
+        amount = to_float(position.get("amount"), 0.0)
+        cover_quote = amount * ask
+        fee_close_quote = cover_quote * (to_float(get_cfg(self.cfg, "risk.taker_fee_pct", 0.25), 0.25) / 100.0)
+        entry_quote = to_float(position.get("quote_amount"), 0.0)
+        fee_open_quote = to_float(position.get("fees_open_quote"), 0.0)
+        net_pnl_quote = entry_quote - fee_open_quote - cover_quote - fee_close_quote
+        holding_time_min = minutes_since(float(position.get("opened_at", utc_now_ts())))
+
+        self.state["short_pnl_quote"] = to_float(self.state.get("short_pnl_quote"), 0.0) + net_pnl_quote
+        self.state["short_trades"] = int(self.state.get("short_trades", 0)) + 1
+        if net_pnl_quote > 0:
+            self.state["short_wins"] = int(self.state.get("short_wins", 0)) + 1
+
+        self.state["short_positions"].pop(symbol, None)
+        self.state["short_cooldown"][symbol] = utc_now_ts()
+        save_state(self.state_file, self.state)
+
+        append_trade_csv(
+            self.trades_file,
+            {
+                "ts": now_iso(),
+                "market": symbol,
+                "side": "SHORT_CLOSE",
+                "price": round(ask, 12),
+                "base_amount": amount,
+                "quote_amount": round(cover_quote, 8),
+                "fees_quote": round(fee_close_quote, 8),
+                "spread_pct": round(self.estimate_spread_pct(ticker), 6),
+                "net_pnl_quote": round(net_pnl_quote, 8),
+                "holding_time_min": round(holding_time_min, 2),
+                "reason": reason,
+                "dry_run": True,
+            },
+        )
+        LOG.info(
+            "PAPER SHORT CLOSE %s | price=%.8f amount=%s pnl=%.4f %s reason=%s",
+            symbol,
+            ask,
+            amount,
+            net_pnl_quote,
+            self.quote,
+            reason,
+        )
+
+    def try_open_paper_short(self, symbol: str) -> None:
+        if not self.short_enabled():
+            return
+        if symbol in self.state["short_positions"]:
+            return
+        if self.short_symbol_in_cooldown(symbol):
+            return
+        if not self.allow_long_and_short_same_symbol() and symbol in self.state.get("positions", {}):
+            return
+
+        signal = self.short_entry_signal(symbol)
+        if not signal:
+            return
+
+        self.open_paper_short(symbol, signal)
+
+    def manage_open_short_positions(self) -> None:
+        positions = list((self.state.get("short_positions") or {}).items())
+        for symbol, position in positions:
+            try:
+                reason = self.short_exit_signal(symbol, position)
+                if reason and self.close_short_allowed_by_profit(symbol, position, reason):
+                    self.close_paper_short(symbol, position, reason)
+            except Exception as e:
+                LOG.exception("Short positiebeheer mislukt voor %s: %s", symbol, e)
 
     def buy_budget_available(self) -> float:
         eur_reserve = to_float(get_cfg(self.cfg, "eur_reserve", 50), 50.0)
@@ -695,19 +951,35 @@ class Bot:
                 LOG.exception("Positiebeheer mislukt voor %s: %s", symbol, e)
 
     def print_status(self, symbols: List[str]) -> None:
+        every_seconds = int(to_float(get_cfg(self.cfg, "risk.skip_log_every_seconds", 600), 600.0))
+        now_ts = utc_now_ts()
+        if every_seconds > 0 and self.last_status_log_ts > 0 and (now_ts - self.last_status_log_ts) < every_seconds:
+            return
+        self.last_status_log_ts = now_ts
+
         pnl = to_float(self.state.get("pnl_quote"), 0.0)
         trades = int(self.state.get("trades", 0))
         wins = int(self.state.get("wins", 0))
         winrate = (wins / trades * 100.0) if trades > 0 else 0.0
+
+        short_pnl = to_float(self.state.get("short_pnl_quote"), 0.0)
+        short_trades = int(self.state.get("short_trades", 0))
+        short_wins = int(self.state.get("short_wins", 0))
+        short_winrate = (short_wins / short_trades * 100.0) if short_trades > 0 else 0.0
+
         LOG.info(
-            "STATUS | dry=%s | symbols=%s | open=%s | invested=%.2f | pnl=%.2f | trades=%s | winrate=%.1f%%",
+            "STATUS | dry=%s | symbols=%s | spot_open=%s | short_open=%s | invested=%.2f | spot_pnl=%.2f | short_pnl=%.2f | spot_trades=%s | short_trades=%s | spot_winrate=%.1f%% | short_winrate=%.1f%%",
             self.dry_run,
             len(symbols),
             self.open_positions_count(),
+            self.short_positions_count(),
             self.bot_invested_quote(),
             pnl,
+            short_pnl,
             trades,
+            short_trades,
             winrate,
+            short_winrate,
         )
 
     def run_once(self) -> None:
