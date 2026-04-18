@@ -1,5 +1,5 @@
 quote: EUR
-symbols: [BTC, ETH, XRP, SOL, ADA]
+symbols: []
 timeframe: "15m"
 
 trading:
@@ -10,9 +10,9 @@ trading:
   allow_long_and_short_same_symbol: false
 
 scanner:
-  auto_scan: false
-  top_n_markets: 5
-  min_quote_volume: 0
+  auto_scan: true
+  top_n_markets: 20
+  min_quote_volume: 250000
   exclude_bases:
     - EUR
     - USDT
@@ -29,10 +29,10 @@ signals:
 
   use_atr: true
   atr_len: 14
-  atr_tp_mult: 2.4
+  atr_tp_mult: 3.0
   atr_sl_mult: 1.3
 
-  exit_on_trend_break: true
+  exit_on_trend_break: false
 
   use_atr_filter: true
   min_atr_pct: 0.30
@@ -40,13 +40,13 @@ signals:
 risk:
   dry_run: false
   fixed_stake_quote: 50
-  max_open_positions: 7
+  max_open_positions: 5
   only_buy_if_not_in_position: true
-  cooldown_minutes: 45
+  cooldown_minutes: 60
   max_spread_pct: 0.20
   eur_reserve: 55
   skip_log_every_seconds: 600
-  min_profit_eur: 0.20
+  min_profit_eur: 0.75
 
 fees:
   taker_fee_pct: 0.25
