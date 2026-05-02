@@ -51,8 +51,8 @@ risk:
   eur_reserve: 55
   skip_log_every_seconds: 600
   min_profit_eur: 0.75
-  avoid_symbols_with_existing_balance: true
-  existing_balance_dust: 0.00000001
+  avoid_symbols_with_existing_balance: false
+  existing_balance_dust: 5
 
 fees:
   taker_fee_pct: 0.25
