@@ -26,6 +26,7 @@ signals:
   use_rsi: true
   rsi_len: 14
   rsi_buy_min: 58
+  rsi_buy_max: 72
 
   use_atr: true
   atr_len: 14
@@ -37,8 +38,11 @@ signals:
   use_atr_filter: true
   min_atr_pct: 0.30
 
+  trailing_enabled: true
+  trailing_atr_mult: 1.2
+
 risk:
-  dry_run: false
+  dry_run: true
   fixed_stake_quote: 50
   max_open_positions: 5
   only_buy_if_not_in_position: true
@@ -47,6 +51,8 @@ risk:
   eur_reserve: 55
   skip_log_every_seconds: 600
   min_profit_eur: 0.75
+  avoid_symbols_with_existing_balance: true
+  existing_balance_dust: 0.00000001
 
 fees:
   taker_fee_pct: 0.25
@@ -55,6 +61,53 @@ logging:
   level: INFO
   loop_sleep_seconds: 60
   candles_limit: 400
+
+news:
+  enabled: true
+  cache_minutes: 15
+  timespan_hours: 24
+  max_records: 20
+
+  use_fear_greed: true
+  fear_greed_buy_max: 80
+
+  fail_open: true
+  allow_buy_without_news: true
+
+  min_news_score_to_buy: 0.0
+  bad_news_score_to_exit: -1.5
+
+  block_on_severe_negative: true
+  force_exit_on_severe_negative: true
+
+  aliases:
+    FET: "fetch ai"
+    TAO: "bittensor"
+    WIF: "dogwifhat"
+    PEPE: "pepe coin"
+    ENA: "ethena"
+    WLD: "worldcoin"
+
+short:
+  leverage: 2
+  margin_per_trade: 30
+  cooldown_minutes: 60
+
+  use_sma: true
+  sma_fast: 20
+  sma_slow: 60
+
+  use_rsi: true
+  rsi_len: 14
+  rsi_sell_max: 40
+
+  use_atr: true
+  atr_len: 14
+  atr_tp_mult: 2.3
+  atr_sl_mult: 1.1
+
+  use_atr_filter: true
+  min_atr_pct: 0.30
 
 files:
   state_file: state.json
