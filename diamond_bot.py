@@ -1,7 +1,11 @@
-import os
-import time
+#!/usr/bin/env python3
+import csv
 import json
 import logging
+import os
+import time
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -11,12 +15,140 @@ import pandas as pd
 import yaml
 from dotenv import load_dotenv
 
+LOG = logging.getLogger("diamond_news")
 
-LOG = logging.getLogger("bitvavo_trend_bot")
+TRADE_CSV_COLUMNS = [
+    "ts",
+    "market",
+    "side",
+    "price",
+    "base_amount",
+    "quote_amount",
+    "fees_quote",
+    "spread_pct",
+    "net_pnl_quote",
+    "holding_time_min",
+    "reason",
+    "dry_run",
+]
+
+ALIASES = {
+    "dry_run": ["risk.dry_run"],
+    "fixed_stake_quote": ["risk.fixed_stake_quote"],
+    "max_open_positions": ["risk.max_open_positions", "trading.max_total_positions"],
+    "max_spread_pct": ["risk.max_spread_pct"],
+    "eur_reserve": ["risk.eur_reserve"],
+    "skip_log_every_seconds": ["risk.skip_log_every_seconds"],
+    "min_profit_eur": ["risk.min_profit_eur"],
+    "cooldown_minutes": ["risk.cooldown_minutes"],
+    "taker_fee_pct": ["fees.taker_fee_pct"],
+    "log_level": ["logging.level"],
+    "loop_sleep_seconds": ["logging.loop_sleep_seconds"],
+    "candles_limit": ["logging.candles_limit"],
+}
+
+SYMBOL_NAME_MAP = {
+    "BTC": "bitcoin",
+    "ETH": "ethereum",
+    "SOL": "solana",
+    "ADA": "cardano",
+    "XRP": "ripple",
+    "DOGE": "dogecoin",
+    "LINK": "chainlink",
+    "AVAX": "avalanche",
+    "DOT": "polkadot",
+    "PEPE": "pepe coin",
+    "WIF": "dogwifhat",
+    "BONK": "bonk",
+    "SHIB": "shiba inu",
+    "TRUMP": "official trump coin",
+    "ENA": "ethena",
+    "FET": "fetch ai",
+    "TAO": "bittensor",
+    "WLD": "worldcoin",
+    "HYPE": "hyperliquid",
+    "ZKJ": "polyhedra",
+}
+
+POSITIVE_TITLE_WORDS = {
+    "approval": 1.8,
+    "approved": 1.8,
+    "etf": 1.2,
+    "launch": 0.8,
+    "launches": 0.8,
+    "listing": 0.8,
+    "listed": 0.8,
+    "partnership": 0.8,
+    "partners": 0.8,
+    "integrates": 0.7,
+    "integration": 0.7,
+    "adoption": 0.7,
+    "upgrade": 0.5,
+    "upgrades": 0.5,
+    "surge": 0.5,
+    "rally": 0.5,
+    "bullish": 0.5,
+    "record": 0.4,
+    "breakout": 0.5,
+    "inflow": 0.6,
+}
+
+NEGATIVE_TITLE_WORDS = {
+    "hack": -2.0,
+    "hacked": -2.0,
+    "exploit": -2.0,
+    "breach": -1.8,
+    "lawsuit": -1.6,
+    "sued": -1.6,
+    "delist": -1.8,
+    "delisting": -1.8,
+    "scam": -2.2,
+    "fraud": -2.0,
+    "rug": -2.2,
+    "rugpull": -2.2,
+    "outage": -1.2,
+    "bankruptcy": -2.4,
+    "liquidation": -1.4,
+    "liquidations": -1.4,
+    "unlock": -1.0,
+    "selloff": -1.2,
+    "dump": -1.2,
+    "bearish": -0.6,
+    "investigation": -1.2,
+    "probe": -1.2,
+    "charges": -1.6,
+}
+
+SEVERE_NEGATIVE_WORDS = {
+    "hack",
+    "hacked",
+    "exploit",
+    "breach",
+    "bankruptcy",
+    "scam",
+    "fraud",
+    "rug",
+    "rugpull",
+    "delist",
+    "delisting",
+    "lawsuit",
+    "charges",
+}
 
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+
+def utc_now_ts() -> float:
+    return time.time()
+
+
+
+def minutes_since(ts: float) -> float:
+    return max(0.0, (utc_now_ts() - ts) / 60.0)
+
 
 
 def to_bool(v: Any, default: bool = False) -> bool:
@@ -32,6 +164,7 @@ def to_bool(v: Any, default: bool = False) -> bool:
     return default
 
 
+
 def to_float(v: Any, default: float = 0.0) -> float:
     if v is None or v == "":
         return default
@@ -40,46 +173,50 @@ def to_float(v: Any, default: float = 0.0) -> float:
     s = str(v).strip().replace("%", "").replace(",", ".")
     try:
         return float(s)
-    except ValueError:
+    except Exception:
         return default
+
 
 
 def ensure_parent(path_str: str) -> None:
     Path(path_str).parent.mkdir(parents=True, exist_ok=True)
 
 
-def load_yaml(path_str: str) -> Dict[str, Any]:
-    with open(path_str, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
-    if not isinstance(data, dict):
-        raise ValueError("Config moet een YAML-dictionary zijn.")
-    return data
 
+def default_state() -> Dict[str, Any]:
+    return {
+        "positions": {},
+        "cooldown": {},
+        "short_positions": {},
+        "short_cooldown": {},
+        "pnl_quote": 0.0,
+        "short_pnl_quote": 0.0,
+        "trades": 0,
+        "wins": 0,
+        "short_trades": 0,
+        "short_wins": 0,
+    }
 
-def setup_logging(level: str = "INFO") -> None:
-    logging.basicConfig(
-        level=getattr(logging, str(level).upper(), logging.INFO),
-        format="%(asctime)s | %(levelname)s | %(message)s",
-    )
 
 
 def load_state(path_str: str) -> Dict[str, Any]:
     p = Path(path_str)
     if not p.exists():
-        return {"positions": {}, "cooldown": {}, "short_positions": {}, "short_cooldown": {}, "pnl_quote": 0.0, "short_pnl_quote": 0.0, "trades": 0, "wins": 0, "short_trades": 0, "short_wins": 0}
-    with open(p, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    data.setdefault("positions", {})
-    data.setdefault("cooldown", {})
-    data.setdefault("short_positions", {})
-    data.setdefault("short_cooldown", {})
-    data.setdefault("pnl_quote", 0.0)
-    data.setdefault("short_pnl_quote", 0.0)
-    data.setdefault("trades", 0)
-    data.setdefault("wins", 0)
-    data.setdefault("short_trades", 0)
-    data.setdefault("short_wins", 0)
-    return data
+        return default_state()
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return default_state()
+    except Exception:
+        return default_state()
+    base = default_state()
+    base.update(data)
+    for k in ["positions", "cooldown", "short_positions", "short_cooldown"]:
+        if not isinstance(base.get(k), dict):
+            base[k] = {}
+    return base
+
 
 
 def save_state(path_str: str, state: Dict[str, Any]) -> None:
@@ -88,48 +225,33 @@ def save_state(path_str: str, state: Dict[str, Any]) -> None:
         json.dump(state, f, indent=2, ensure_ascii=False)
 
 
+
 def append_trade_csv(path_str: str, row: Dict[str, Any]) -> None:
     ensure_parent(path_str)
-    cols = [
-        "ts",
-        "market",
-        "side",
-        "price",
-        "base_amount",
-        "quote_amount",
-        "fees_quote",
-        "spread_pct",
-        "net_pnl_quote",
-        "holding_time_min",
-        "reason",
-        "dry_run",
-    ]
     exists = Path(path_str).exists()
-    df = pd.DataFrame([row], columns=cols)
-    df.to_csv(path_str, mode="a", index=False, header=not exists)
+    with open(path_str, "a", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=TRADE_CSV_COLUMNS)
+        if not exists:
+            writer.writeheader()
+        writer.writerow({k: row.get(k, "") for k in TRADE_CSV_COLUMNS})
 
 
-ALIASES = {
-    "dry_run": ["risk.dry_run"],
-    "log_level": ["logging.level"],
-    "candles_limit": ["logging.candles_limit"],
-    "loop_sleep_seconds": ["logging.loop_sleep_seconds"],
-    "fixed_stake_quote": ["risk.fixed_stake_quote"],
-    "max_open_positions": ["risk.max_open_positions", "trading.max_total_positions"],
-    "max_spread_pct": ["risk.max_spread_pct"],
-    "eur_reserve": ["risk.eur_reserve"],
-    "risk.taker_fee_pct": ["fees.taker_fee_pct"],
-    "strategy.sma_fast": ["signals.sma_fast"],
-    "strategy.sma_slow": ["signals.sma_slow"],
-    "strategy.rsi_len": ["signals.rsi_len"],
-    "strategy.rsi_buy_min": ["signals.rsi_buy_min"],
-    "strategy.rsi_buy_max": ["signals.rsi_buy_max"],
-    "strategy.atr_len": ["signals.atr_len"],
-    "strategy.atr_tp_mult": ["signals.atr_tp_mult"],
-    "strategy.atr_sl_mult": ["signals.atr_sl_mult"],
-    "strategy.min_atr_pct": ["signals.min_atr_pct"],
-    "strategy.exit_on_trend_break": ["signals.exit_on_trend_break"],
-}
+
+def load_yaml(path_str: str) -> Dict[str, Any]:
+    with open(path_str, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    if not isinstance(data, dict):
+        raise ValueError("Config moet een YAML dictionary zijn.")
+    return data
+
+
+
+def setup_logging(level: str = "INFO") -> None:
+    logging.basicConfig(
+        level=getattr(logging, str(level).upper(), logging.INFO),
+        format="%(asctime)s | %(levelname)s | %(message)s",
+    )
+
 
 
 def _get_path(cfg: Dict[str, Any], path: str, default: Any = None) -> Any:
@@ -165,13 +287,6 @@ def normalize_symbol(symbol: str, quote: str) -> str:
     return f"{s}/{q}"
 
 
-def utc_now_ts() -> float:
-    return time.time()
-
-
-def minutes_since(ts: float) -> float:
-    return max(0.0, (utc_now_ts() - ts) / 60.0)
-
 
 def compute_rsi(series: pd.Series, length: int = 14) -> pd.Series:
     delta = series.diff()
@@ -179,9 +294,10 @@ def compute_rsi(series: pd.Series, length: int = 14) -> pd.Series:
     loss = -delta.clip(upper=0)
     avg_gain = gain.ewm(alpha=1 / length, adjust=False, min_periods=length).mean()
     avg_loss = loss.ewm(alpha=1 / length, adjust=False, min_periods=length).mean()
-    rs = avg_gain / avg_loss.replace(0, pd.NA)
+    rs = avg_gain / avg_loss.replace(0, 1e-12)
     rsi = 100 - (100 / (1 + rs))
     return rsi.fillna(50)
+
 
 
 def compute_atr(df: pd.DataFrame, length: int = 14) -> pd.Series:
@@ -197,6 +313,7 @@ def compute_atr(df: pd.DataFrame, length: int = 14) -> pd.Series:
     return tr.ewm(alpha=1 / length, adjust=False, min_periods=length).mean()
 
 
+
 def enrich_indicators(df: pd.DataFrame, sma_fast: int, sma_slow: int, rsi_len: int, atr_len: int) -> pd.DataFrame:
     out = df.copy()
     out["sma_fast"] = out["close"].rolling(sma_fast).mean()
@@ -207,40 +324,221 @@ def enrich_indicators(df: pd.DataFrame, sma_fast: int, sma_slow: int, rsi_len: i
     return out
 
 
+
+def http_get_json(url: str, timeout: int = 20) -> Any:
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "diamond-news-bot/1.0",
+            "Accept": "application/json,text/plain,*/*",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read()
+    return json.loads(raw.decode("utf-8", errors="replace"))
+
+
+
+class NewsEngine:
+    def __init__(self, cfg: Dict[str, Any], exchange: ccxt.Exchange):
+        self.cfg = cfg
+        self.exchange = exchange
+        self.enabled = to_bool(get_cfg(cfg, "news.enabled", True), True)
+        self.cache_ttl_sec = int(to_float(get_cfg(cfg, "news.cache_minutes", 15), 15) * 60)
+        self.cache: Dict[str, Dict[str, Any]] = {}
+        self.fng_cache: Dict[str, Any] = {"ts": 0.0, "value": None, "classification": "unknown"}
+
+    def _cache_get(self, key: str) -> Optional[Dict[str, Any]]:
+        item = self.cache.get(key)
+        if not item:
+            return None
+        if utc_now_ts() - float(item.get("ts", 0.0)) > self.cache_ttl_sec:
+            return None
+        return item.get("value")
+
+    def _cache_set(self, key: str, value: Dict[str, Any]) -> Dict[str, Any]:
+        self.cache[key] = {"ts": utc_now_ts(), "value": value}
+        return value
+
+    def news_term_for_symbol(self, symbol: str) -> str:
+        market = self.exchange.market(symbol)
+        base = str(market.get("base", "")).upper()
+        custom = get_cfg(self.cfg, f"news.aliases.{base}", None)
+        if custom:
+            return str(custom)
+        return SYMBOL_NAME_MAP.get(base, base.lower())
+
+    def fear_greed(self) -> Dict[str, Any]:
+        if not self.enabled or not to_bool(get_cfg(self.cfg, "news.use_fear_greed", True), True):
+            return {"value": None, "classification": "disabled"}
+        if utc_now_ts() - float(self.fng_cache.get("ts", 0.0)) < self.cache_ttl_sec and self.fng_cache.get("value") is not None:
+            return {"value": self.fng_cache.get("value"), "classification": self.fng_cache.get("classification", "unknown")}
+        try:
+            data = http_get_json("https://api.alternative.me/fng/?limit=1&format=json", timeout=15)
+            row = ((data or {}).get("data") or [{}])[0]
+            value = int(row.get("value"))
+            classification = str(row.get("value_classification", "unknown"))
+            self.fng_cache = {"ts": utc_now_ts(), "value": value, "classification": classification}
+            return {"value": value, "classification": classification}
+        except Exception as e:
+            LOG.warning("Fear & Greed ophalen mislukt: %s", e)
+            return {"value": None, "classification": "unknown"}
+
+    def gdelt_articles(self, term: str) -> List[Dict[str, Any]]:
+        hours = int(to_float(get_cfg(self.cfg, "news.timespan_hours", 24), 24))
+        max_records = int(to_float(get_cfg(self.cfg, "news.max_records", 20), 20))
+        params = {
+            "query": f'"{term}"',
+            "mode": "ArtList",
+            "format": "json",
+            "timespan": f"{hours}h",
+            "maxrecords": str(max_records),
+            "sort": "DateDesc",
+        }
+        url = "https://api.gdeltproject.org/api/v2/doc/doc?" + urllib.parse.urlencode(params)
+        data = http_get_json(url, timeout=20)
+        if isinstance(data, dict):
+            for key in ["articles", "data", "results"]:
+                if isinstance(data.get(key), list):
+                    return data.get(key) or []
+        if isinstance(data, list):
+            return data
+        return []
+
+    def title_sentiment_score(self, text: str) -> float:
+        t = str(text or "").lower()
+        score = 0.0
+        for word, weight in POSITIVE_TITLE_WORDS.items():
+            if word in t:
+                score += weight
+        for word, weight in NEGATIVE_TITLE_WORDS.items():
+            if word in t:
+                score += weight
+        return score
+
+    def severe_negative_count(self, titles: List[str]) -> int:
+        count = 0
+        for title in titles:
+            t = str(title or "").lower()
+            if any(word in t for word in SEVERE_NEGATIVE_WORDS):
+                count += 1
+        return count
+
+    def coin_news(self, symbol: str) -> Dict[str, Any]:
+        if not self.enabled:
+            return {"term": None, "article_count": 0, "news_score": 0.0, "severe_negative_count": 0, "titles": [], "ok": True}
+        cached = self._cache_get(symbol)
+        if cached is not None:
+            return cached
+        term = self.news_term_for_symbol(symbol)
+        try:
+            articles = self.gdelt_articles(term)
+            titles: List[str] = []
+            score = 0.0
+            for article in articles:
+                title = str((article or {}).get("title") or "")
+                if title:
+                    titles.append(title)
+                    score += self.title_sentiment_score(title)
+            result = {
+                "term": term,
+                "article_count": len(titles),
+                "news_score": round(score, 4),
+                "severe_negative_count": self.severe_negative_count(titles),
+                "titles": titles[:5],
+                "ok": True,
+            }
+            return self._cache_set(symbol, result)
+        except Exception as e:
+            LOG.warning("News ophalen mislukt voor %s: %s", symbol, e)
+            result = {"term": term, "article_count": 0, "news_score": 0.0, "severe_negative_count": 0, "titles": [], "ok": False}
+            return self._cache_set(symbol, result)
+
+    def buy_gate(self, symbol: str) -> Dict[str, Any]:
+        if not self.enabled:
+            return {"allow": True, "reason": "news_disabled"}
+        fail_open = to_bool(get_cfg(self.cfg, "news.fail_open", True), True)
+        allow_without_news = to_bool(get_cfg(self.cfg, "news.allow_buy_without_news", True), True)
+        min_score = to_float(get_cfg(self.cfg, "news.min_news_score_to_buy", 0.0), 0.0)
+        block_on_severe = to_bool(get_cfg(self.cfg, "news.block_on_severe_negative", True), True)
+        max_fng = int(to_float(get_cfg(self.cfg, "news.fear_greed_buy_max", 80), 80))
+
+        fng = self.fear_greed()
+        if fng.get("value") is not None and int(fng["value"]) > max_fng:
+            return {"allow": False, "reason": f"fear_greed_too_high:{fng['value']}"}
+
+        news = self.coin_news(symbol)
+        if not news.get("ok", False) and not fail_open:
+            return {"allow": False, "reason": "news_fetch_failed"}
+        if news.get("severe_negative_count", 0) > 0 and block_on_severe:
+            return {"allow": False, "reason": "severe_negative_news"}
+        if int(news.get("article_count", 0)) == 0 and not allow_without_news:
+            return {"allow": False, "reason": "no_news"}
+        if to_float(news.get("news_score", 0.0), 0.0) < min_score:
+            return {"allow": False, "reason": f"news_score_below_min:{news.get('news_score')}"}
+        return {"allow": True, "reason": f"news_ok:{news.get('news_score')}", "news": news, "fear_greed": fng}
+
+    def forced_exit_reason(self, symbol: str) -> Optional[str]:
+        if not self.enabled:
+            return None
+        news = self.coin_news(symbol)
+        min_bad = to_float(get_cfg(self.cfg, "news.bad_news_score_to_exit", -1.5), -1.5)
+        severe_force = to_bool(get_cfg(self.cfg, "news.force_exit_on_severe_negative", True), True)
+        if severe_force and int(news.get("severe_negative_count", 0)) > 0:
+            return "bad_news"
+        if to_float(news.get("news_score", 0.0), 0.0) <= min_bad and int(news.get("article_count", 0)) > 0:
+            return "bad_news"
+        return None
+
+
+
 class Bot:
     def __init__(self, cfg: Dict[str, Any]):
         self.cfg = cfg
         self.quote = str(get_cfg(cfg, "quote", "EUR")).upper()
         self.dry_run = to_bool(get_cfg(cfg, "dry_run", True), True)
-        files = get_cfg(cfg, "files", {}) or {}
-        self.state_file = str(files.get("state_file", "state.json"))
-        self.trades_file = str(files.get("trades_file", "transactions.csv"))
+        self.state_file = str(get_cfg(cfg, "files.state_file", "state.json"))
+        self.trades_file = str(get_cfg(cfg, "files.trades_file", "transactions.csv"))
+
         self.state = load_state(self.state_file)
+        save_state(self.state_file, self.state)
+
         self.last_status_log_ts = 0.0
+        self.last_hold_log_ts: Dict[str, float] = {}
+        self.last_skip_log_ts: Dict[str, float] = {}
+        self.balance_cache: Dict[str, Any] = {"free": {}, "total": {}}
 
         load_dotenv()
-        api_key = os.getenv("BITVAVO_API_KEY", "")
-        api_secret = os.getenv("BITVAVO_API_SECRET", "")
-        operator_id = os.getenv("BITVAVO_OPERATOR_ID", "").strip()
+        self.api_key = os.getenv("BITVAVO_API_KEY", "").strip()
+        self.api_secret = os.getenv("BITVAVO_API_SECRET", "").strip()
+        self.operator_id = os.getenv("BITVAVO_OPERATOR_ID", "").strip()
 
-        if not operator_id:
-            raise ValueError("BITVAVO_OPERATOR_ID ontbreekt in je environment variables.")
+        if not self.dry_run:
+            if not self.api_key or not self.api_secret:
+                raise ValueError("BITVAVO_API_KEY of BITVAVO_API_SECRET ontbreekt.")
+            if not self.operator_id:
+                raise ValueError("BITVAVO_OPERATOR_ID ontbreekt.")
 
-        self.operator_id = int(operator_id)
         self.exchange = ccxt.bitvavo(
             {
-                "apiKey": api_key,
-                "secret": api_secret,
+                "apiKey": self.api_key,
+                "secret": self.api_secret,
                 "enableRateLimit": True,
                 "options": {"fetchMarkets": {"types": ["spot"]}},
             }
         )
         self.exchange.load_markets()
+        self.news = NewsEngine(cfg, self.exchange)
 
     def order_params(self) -> Dict[str, Any]:
-        return {"operatorId": self.operator_id}
+        if self.operator_id:
+            return {"operatorId": self.operator_id}
+        return {}
 
     def safe_fetch_balance(self) -> Dict[str, Any]:
+        if self.dry_run and (not self.api_key or not self.api_secret):
+            simulated_quote = to_float(get_cfg(self.cfg, "risk.simulated_quote_balance", 1000), 1000.0)
+            return {"free": {self.quote: simulated_quote}, "total": {self.quote: simulated_quote}}
         for i in range(3):
             try:
                 return self.exchange.fetch_balance()
@@ -249,20 +547,28 @@ class Bot:
                 time.sleep(1.5 * (i + 1))
         raise RuntimeError("Kon saldo niet ophalen.")
 
-    def free_quote_balance(self, quote: Optional[str] = None) -> float:
-        quote = str(quote or self.quote).upper()
-        bal = self.safe_fetch_balance()
-        free = bal.get("free", {}) or {}
-        total = bal.get("total", {}) or {}
-        if quote in free and free[quote] is not None:
-            return float(free[quote])
-        if quote in total and total[quote] is not None:
-            return float(total[quote])
+    def refresh_balance_cache(self) -> None:
+        try:
+            self.balance_cache = self.safe_fetch_balance()
+        except Exception as e:
+            LOG.warning("Kon balanscache niet verversen: %s", e)
+
+    def asset_balance(self, asset: str) -> float:
+        asset = str(asset).upper()
+        free = self.balance_cache.get("free") or {}
+        total = self.balance_cache.get("total") or {}
+        if asset in free and free[asset] is not None:
+            return float(free[asset])
+        if asset in total and total[asset] is not None:
+            return float(total[asset])
         return 0.0
+
+    def free_quote_balance(self) -> float:
+        return self.asset_balance(self.quote)
 
     def fetch_ohlcv_df(self, symbol: str) -> pd.DataFrame:
         timeframe = str(get_cfg(self.cfg, "timeframe", "15m"))
-        limit = int(get_cfg(self.cfg, "candles_limit", 300))
+        limit = int(to_float(get_cfg(self.cfg, "candles_limit", 400), 400))
         rows = self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
         df = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"])
         if df.empty:
@@ -279,12 +585,11 @@ class Bot:
         if limit_cost:
             return float(limit_cost)
         info = m.get("info") or {}
-        raw = info.get("minOrderInQuoteAsset")
+        raw = info.get("minOrderInQuoteAsset") or info.get("minOrderInBaseAsset")
         return to_float(raw, 5.0)
 
     def amount_to_precision_safe(self, symbol: str, amount: float) -> float:
-        amt = self.exchange.amount_to_precision(symbol, amount)
-        return float(amt)
+        return float(self.exchange.amount_to_precision(symbol, amount))
 
     def estimate_spread_pct(self, ticker: Dict[str, Any]) -> float:
         bid = to_float(ticker.get("bid"), 0.0)
@@ -298,51 +603,46 @@ class Bot:
         manual = get_cfg(self.cfg, "symbols", []) or []
         if manual:
             return [normalize_symbol(str(s), self.quote) for s in manual]
-
-        top_n = int(get_cfg(self.cfg, "scanner.top_n_markets", 30))
+        auto_scan = to_bool(get_cfg(self.cfg, "scanner.auto_scan", False), False)
+        if not auto_scan:
+            return []
+        top_n = int(to_float(get_cfg(self.cfg, "scanner.top_n_markets", 20), 20))
         min_quote_volume = to_float(get_cfg(self.cfg, "scanner.min_quote_volume", 250000), 250000.0)
+        max_spread_pct = to_float(get_cfg(self.cfg, "max_spread_pct", 0.20), 0.20)
         exclude_bases = {str(x).upper() for x in (get_cfg(self.cfg, "scanner.exclude_bases", ["EUR", "USDT", "USDC"]) or [])}
-        max_spread_pct = to_float(get_cfg(self.cfg, "max_spread_pct", 0.35), 0.35)
 
         candidates = []
         tickers = self.exchange.fetch_tickers()
-        for symbol, t in tickers.items():
+        for symbol, ticker in tickers.items():
             try:
                 market = self.exchange.market(symbol)
             except Exception:
                 continue
             if not market.get("spot", True):
                 continue
-            if market.get("quote") != self.quote:
+            if str(market.get("quote", "")).upper() != self.quote:
                 continue
             base = str(market.get("base", "")).upper()
             if base in exclude_bases:
                 continue
-            qv = t.get("quoteVolume")
+            last = to_float(ticker.get("last"), 0.0)
+            bid = to_float(ticker.get("bid"), 0.0)
+            ask = to_float(ticker.get("ask"), 0.0)
+            if min(last, bid, ask) <= 0:
+                continue
+            qv = ticker.get("quoteVolume")
             if qv is None:
-                info = t.get("info") or {}
+                info = ticker.get("info") or {}
                 qv = info.get("quoteVolume") or info.get("volumeQuote")
             qv = to_float(qv, 0.0)
-            spread_pct = self.estimate_spread_pct(t)
+            spread_pct = self.estimate_spread_pct(ticker)
             if qv < min_quote_volume:
                 continue
             if spread_pct > max_spread_pct:
                 continue
-            last = to_float(t.get("last"), 0.0)
-            bid = to_float(t.get("bid"), 0.0)
-            ask = to_float(t.get("ask"), 0.0)
-            if min(last, bid, ask) <= 0:
-                continue
             candidates.append((symbol, qv, spread_pct))
         candidates.sort(key=lambda x: (-x[1], x[2], x[0]))
-        return [x[0] for x in candidates[:top_n]]
-
-    def symbol_in_cooldown(self, symbol: str) -> bool:
-        cd = self.state.get("cooldown", {}).get(symbol)
-        if not cd:
-            return False
-        cooldown_minutes = to_float(get_cfg(self.cfg, "risk.cooldown_minutes", 45), 45.0)
-        return minutes_since(float(cd)) < cooldown_minutes
+        return [c[0] for c in candidates[:top_n]]
 
     def open_positions_count(self) -> int:
         return len(self.state.get("positions", {}))
@@ -356,276 +656,65 @@ class Bot:
             total += to_float(pos.get("quote_amount"), 0.0)
         return total
 
+    def symbol_in_cooldown(self, symbol: str) -> bool:
+        ts = self.state.get("cooldown", {}).get(symbol)
+        if not ts:
+            return False
+        cooldown = to_float(get_cfg(self.cfg, "cooldown_minutes", 45), 45.0)
+        return minutes_since(float(ts)) < cooldown
+
+    def short_symbol_in_cooldown(self, symbol: str) -> bool:
+        ts = self.state.get("short_cooldown", {}).get(symbol)
+        if not ts:
+            return False
+        cooldown = to_float(get_cfg(self.cfg, "short.cooldown_minutes", 60), 60.0)
+        return minutes_since(float(ts)) < cooldown
+
     def short_enabled(self) -> bool:
         return to_bool(get_cfg(self.cfg, "trading.enable_short_signals", False), False)
 
     def allow_long_and_short_same_symbol(self) -> bool:
         return to_bool(get_cfg(self.cfg, "trading.allow_long_and_short_same_symbol", False), False)
 
-    def short_symbol_in_cooldown(self, symbol: str) -> bool:
-        cd = self.state.get("short_cooldown", {}).get(symbol)
-        if not cd:
-            return False
-        cooldown_minutes = to_float(get_cfg(self.cfg, "short.cooldown_minutes", 60), 60.0)
-        return minutes_since(float(cd)) < cooldown_minutes
-
-    def short_entry_signal(self, symbol: str) -> Optional[Dict[str, Any]]:
-        df = self.fetch_ohlcv_df(symbol)
-        df = enrich_indicators(
-            df,
-            sma_fast=int(get_cfg(self.cfg, "short.sma_fast", 20)),
-            sma_slow=int(get_cfg(self.cfg, "short.sma_slow", 60)),
-            rsi_len=int(get_cfg(self.cfg, "short.rsi_len", 14)),
-            atr_len=int(get_cfg(self.cfg, "short.atr_len", 14)),
-        )
-        if len(df) < max(int(get_cfg(self.cfg, "short.sma_slow", 60)) + 2, 80):
-            return None
-
-        last = df.iloc[-1]
-        prev = df.iloc[-2]
-
-        fast_now = to_float(last["sma_fast"], 0.0)
-        slow_now = to_float(last["sma_slow"], 0.0)
-        fast_prev = to_float(prev["sma_fast"], 0.0)
-        slow_prev = to_float(prev["sma_slow"], 0.0)
-        close_now = to_float(last["close"], 0.0)
-        rsi_now = to_float(last["rsi"], 50.0)
-        atr_now = to_float(last["atr"], 0.0)
-        atr_pct = to_float(last["atr_pct"], 0.0)
-
-        cross_down = fast_prev >= slow_prev and fast_now < slow_now
-        trend_ok = fast_now < slow_now and close_now < fast_now
-        momentum_ok = rsi_now <= to_float(get_cfg(self.cfg, "short.rsi_sell_max", 40), 40.0)
-        volatility_ok = atr_pct >= to_float(get_cfg(self.cfg, "short.min_atr_pct", 0.30), 0.30)
-
-        if cross_down and trend_ok and momentum_ok and volatility_ok and atr_now > 0:
-            tp_mult = to_float(get_cfg(self.cfg, "short.atr_tp_mult", 2.3), 2.3)
-            sl_mult = to_float(get_cfg(self.cfg, "short.atr_sl_mult", 1.1), 1.1)
-            return {
-                "close": close_now,
-                "atr": atr_now,
-                "rsi": rsi_now,
-                "atr_pct": atr_pct,
-                "stop_loss": close_now + atr_now * sl_mult,
-                "take_profit": close_now - atr_now * tp_mult,
-            }
-        return None
-
-    def short_exit_signal(self, symbol: str, position: Dict[str, Any]) -> Optional[str]:
-        df = self.fetch_ohlcv_df(symbol)
-        df = enrich_indicators(
-            df,
-            sma_fast=int(get_cfg(self.cfg, "short.sma_fast", 20)),
-            sma_slow=int(get_cfg(self.cfg, "short.sma_slow", 60)),
-            rsi_len=int(get_cfg(self.cfg, "short.rsi_len", 14)),
-            atr_len=int(get_cfg(self.cfg, "short.atr_len", 14)),
-        )
-        last = df.iloc[-1]
-        price = to_float(last["close"], 0.0)
-        fast = to_float(last["sma_fast"], 0.0)
-        slow = to_float(last["sma_slow"], 0.0)
-        stop_loss = to_float(position.get("stop_loss"), 0.0)
-        take_profit = to_float(position.get("take_profit"), 0.0)
-
-        if stop_loss > 0 and price >= stop_loss:
-            return "short_stop_loss"
-        if take_profit > 0 and price <= take_profit:
-            return "short_take_profit"
-        if to_bool(get_cfg(self.cfg, "signals.exit_on_trend_break", True), True) and fast > slow:
-            return "short_trend_break"
-        return None
-
-    def estimated_short_exit_pnl_quote(self, symbol: str, position: Dict[str, Any], ask_price: Optional[float] = None) -> float:
-        if ask_price is None:
-            ticker = self.get_ticker(symbol)
-            ask_price = to_float(ticker.get("ask"), 0.0)
-        amount = to_float(position.get("amount"), 0.0)
-        cover_quote = amount * max(ask_price or 0.0, 0.0)
-        taker_fee_pct = to_float(get_cfg(self.cfg, "risk.taker_fee_pct", 0.25), 0.25)
-        est_cover_fee = cover_quote * (taker_fee_pct / 100.0)
-        entry_quote = to_float(position.get("quote_amount"), 0.0)
-        fee_open_quote = to_float(position.get("fees_open_quote"), 0.0)
-        return entry_quote - fee_open_quote - cover_quote - est_cover_fee
-
-    def close_short_allowed_by_profit(self, symbol: str, position: Dict[str, Any], reason: str) -> bool:
-        if reason == "short_stop_loss":
-            return True
-
-        min_profit_eur = to_float(get_cfg(self.cfg, "risk.min_profit_eur", 0.0), 0.0)
-        if min_profit_eur <= 0:
-            return True
-
-        ticker = self.get_ticker(symbol)
-        ask = to_float(ticker.get("ask"), 0.0)
-        if ask <= 0:
-            return False
-
-        est_pnl = self.estimated_short_exit_pnl_quote(symbol, position, ask)
-        if est_pnl >= min_profit_eur:
-            return True
-
-        LOG.info(
-            "HOLD SHORT %s | reason=%s | est_pnl=%.4f %s < min_profit=%.4f %s",
-            symbol,
-            reason,
-            est_pnl,
-            self.quote,
-            min_profit_eur,
-            self.quote,
-        )
-        return False
-
-    def open_paper_short(self, symbol: str, signal: Dict[str, Any]) -> None:
-        ticker = self.get_ticker(symbol)
-        bid = to_float(ticker.get("bid"), 0.0)
-        if bid <= 0:
-            return
-        leverage = max(1.0, to_float(get_cfg(self.cfg, "short.leverage", 1), 1.0))
-        margin_per_trade = to_float(get_cfg(self.cfg, "short.margin_per_trade", 30), 30.0)
-        quote_amount = margin_per_trade * leverage
-        amount = self.amount_to_precision_safe(symbol, quote_amount / bid)
-        quote_amount = amount * bid
-        fee_open_quote = quote_amount * (to_float(get_cfg(self.cfg, "risk.taker_fee_pct", 0.25), 0.25) / 100.0)
-
-        self.state["short_positions"][symbol] = {
-            "paper_only": True,
-            "opened_at": utc_now_ts(),
-            "entry_price": bid,
-            "amount": amount,
-            "margin_quote": margin_per_trade,
-            "leverage": leverage,
-            "quote_amount": quote_amount,
-            "fees_open_quote": fee_open_quote,
-            "stop_loss": signal["stop_loss"],
-            "take_profit": signal["take_profit"],
-        }
-        save_state(self.state_file, self.state)
-
-        append_trade_csv(
-            self.trades_file,
-            {
-                "ts": now_iso(),
-                "market": symbol,
-                "side": "SHORT_OPEN",
-                "price": round(bid, 12),
-                "base_amount": amount,
-                "quote_amount": round(quote_amount, 8),
-                "fees_quote": round(fee_open_quote, 8),
-                "spread_pct": round(self.estimate_spread_pct(ticker), 6),
-                "net_pnl_quote": "",
-                "holding_time_min": "",
-                "reason": "paper_short_entry",
-                "dry_run": True,
-            },
-        )
-        LOG.info(
-            "PAPER SHORT OPEN %s | price=%.8f amount=%s notional=%.2f %s lev=%.2f",
-            symbol,
-            bid,
-            amount,
-            quote_amount,
-            self.quote,
-            leverage,
-        )
-
-    def close_paper_short(self, symbol: str, position: Dict[str, Any], reason: str) -> None:
-        ticker = self.get_ticker(symbol)
-        ask = to_float(ticker.get("ask"), 0.0)
-        if ask <= 0:
-            return
-        amount = to_float(position.get("amount"), 0.0)
-        cover_quote = amount * ask
-        fee_close_quote = cover_quote * (to_float(get_cfg(self.cfg, "risk.taker_fee_pct", 0.25), 0.25) / 100.0)
-        entry_quote = to_float(position.get("quote_amount"), 0.0)
-        fee_open_quote = to_float(position.get("fees_open_quote"), 0.0)
-        net_pnl_quote = entry_quote - fee_open_quote - cover_quote - fee_close_quote
-        holding_time_min = minutes_since(float(position.get("opened_at", utc_now_ts())))
-
-        self.state["short_pnl_quote"] = to_float(self.state.get("short_pnl_quote"), 0.0) + net_pnl_quote
-        self.state["short_trades"] = int(self.state.get("short_trades", 0)) + 1
-        if net_pnl_quote > 0:
-            self.state["short_wins"] = int(self.state.get("short_wins", 0)) + 1
-
-        self.state["short_positions"].pop(symbol, None)
-        self.state["short_cooldown"][symbol] = utc_now_ts()
-        save_state(self.state_file, self.state)
-
-        append_trade_csv(
-            self.trades_file,
-            {
-                "ts": now_iso(),
-                "market": symbol,
-                "side": "SHORT_CLOSE",
-                "price": round(ask, 12),
-                "base_amount": amount,
-                "quote_amount": round(cover_quote, 8),
-                "fees_quote": round(fee_close_quote, 8),
-                "spread_pct": round(self.estimate_spread_pct(ticker), 6),
-                "net_pnl_quote": round(net_pnl_quote, 8),
-                "holding_time_min": round(holding_time_min, 2),
-                "reason": reason,
-                "dry_run": True,
-            },
-        )
-        LOG.info(
-            "PAPER SHORT CLOSE %s | price=%.8f amount=%s pnl=%.4f %s reason=%s",
-            symbol,
-            ask,
-            amount,
-            net_pnl_quote,
-            self.quote,
-            reason,
-        )
-
-    def try_open_paper_short(self, symbol: str) -> None:
-        if not self.short_enabled():
-            return
-        if symbol in self.state["short_positions"]:
-            return
-        if self.short_symbol_in_cooldown(symbol):
-            return
-        if not self.allow_long_and_short_same_symbol() and symbol in self.state.get("positions", {}):
-            return
-
-        signal = self.short_entry_signal(symbol)
-        if not signal:
-            return
-
-        self.open_paper_short(symbol, signal)
-
-    def manage_open_short_positions(self) -> None:
-        positions = list((self.state.get("short_positions") or {}).items())
-        for symbol, position in positions:
-            try:
-                reason = self.short_exit_signal(symbol, position)
-                if reason and self.close_short_allowed_by_profit(symbol, position, reason):
-                    self.close_paper_short(symbol, position, reason)
-            except Exception as e:
-                LOG.exception("Short positiebeheer mislukt voor %s: %s", symbol, e)
+    def spot_enabled(self) -> bool:
+        return to_bool(get_cfg(self.cfg, "trading.enable_spot", True), True)
 
     def buy_budget_available(self) -> float:
-        eur_reserve = to_float(get_cfg(self.cfg, "eur_reserve", 50), 50.0)
-        capital_limit = to_float(get_cfg(self.cfg, "capital_limit_quote", 150), 150.0)
-        free_quote = self.free_quote_balance(self.quote)
-        room_from_balance = max(0.0, free_quote - eur_reserve)
-        room_from_cap = max(0.0, capital_limit - self.bot_invested_quote())
-        return min(room_from_balance, room_from_cap)
+        reserve = to_float(get_cfg(self.cfg, "eur_reserve", 55), 55.0)
+        free_quote = self.free_quote_balance()
+        return max(0.0, free_quote - reserve)
 
-    def entry_signal(self, symbol: str) -> Optional[Dict[str, Any]]:
+    def rate_limited_info(self, bucket: Dict[str, float], key: str, seconds: int, message: str, *args) -> None:
+        now_ts = utc_now_ts()
+        last_ts = float(bucket.get(key, 0.0))
+        if now_ts - last_ts >= seconds:
+            LOG.info(message, *args)
+            bucket[key] = now_ts
+
+    def skip_symbol_due_to_existing_balance(self, symbol: str) -> bool:
+        avoid_existing = to_bool(get_cfg(self.cfg, "risk.avoid_symbols_with_existing_balance", True), True)
+        if not avoid_existing:
+            return False
+        market = self.exchange.market(symbol)
+        base = str(market.get("base", "")).upper()
+        dust = to_float(get_cfg(self.cfg, "risk.existing_balance_dust", 0.00000001), 0.00000001)
+        base_balance = self.asset_balance(base)
+        if base_balance > dust:
+            self.rate_limited_info(self.last_skip_log_ts, f"existing:{symbol}", 3600, "SKIP BUY %s | bestaande %s balance=%.12f", symbol, base, base_balance)
+            return True
+        return False
+
+    def long_entry_signal(self, symbol: str) -> Optional[Dict[str, Any]]:
         df = self.fetch_ohlcv_df(symbol)
-        df = enrich_indicators(
-            df,
-            sma_fast=int(get_cfg(self.cfg, "strategy.sma_fast", 20)),
-            sma_slow=int(get_cfg(self.cfg, "strategy.sma_slow", 60)),
-            rsi_len=int(get_cfg(self.cfg, "strategy.rsi_len", 14)),
-            atr_len=int(get_cfg(self.cfg, "strategy.atr_len", 14)),
-        )
-        if len(df) < max(int(get_cfg(self.cfg, "strategy.sma_slow", 60)) + 2, 80):
+        sma_fast = int(to_float(get_cfg(self.cfg, "signals.sma_fast", 20), 20))
+        sma_slow = int(to_float(get_cfg(self.cfg, "signals.sma_slow", 60), 60))
+        rsi_len = int(to_float(get_cfg(self.cfg, "signals.rsi_len", 14), 14))
+        atr_len = int(to_float(get_cfg(self.cfg, "signals.atr_len", 14), 14))
+        df = enrich_indicators(df, sma_fast, sma_slow, rsi_len, atr_len)
+        if len(df) < max(sma_slow + 2, 80):
             return None
-
         last = df.iloc[-1]
         prev = df.iloc[-2]
-
         fast_now = to_float(last["sma_fast"], 0.0)
         slow_now = to_float(last["sma_slow"], 0.0)
         fast_prev = to_float(prev["sma_fast"], 0.0)
@@ -635,58 +724,53 @@ class Bot:
         atr_now = to_float(last["atr"], 0.0)
         atr_pct = to_float(last["atr_pct"], 0.0)
 
-        rsi_min = to_float(get_cfg(self.cfg, "strategy.rsi_buy_min", 55), 55.0)
-        rsi_max = to_float(get_cfg(self.cfg, "strategy.rsi_buy_max", 72), 72.0)
-        min_atr_pct = to_float(get_cfg(self.cfg, "strategy.min_atr_pct", 0.25), 0.25)
+        use_sma = to_bool(get_cfg(self.cfg, "signals.use_sma", True), True)
+        use_rsi = to_bool(get_cfg(self.cfg, "signals.use_rsi", True), True)
+        use_atr_filter = to_bool(get_cfg(self.cfg, "signals.use_atr_filter", True), True)
 
         cross_up = fast_prev <= slow_prev and fast_now > slow_now
         trend_ok = fast_now > slow_now and close_now > fast_now
-        momentum_ok = rsi_min <= rsi_now <= rsi_max
-        volatility_ok = atr_pct >= min_atr_pct
+        sma_ok = (cross_up and trend_ok) if use_sma else True
+        rsi_min = to_float(get_cfg(self.cfg, "signals.rsi_buy_min", 58), 58.0)
+        rsi_max = to_float(get_cfg(self.cfg, "signals.rsi_buy_max", 72), 72.0)
+        rsi_ok = (rsi_min <= rsi_now <= rsi_max) if use_rsi else True
+        min_atr_pct = to_float(get_cfg(self.cfg, "signals.min_atr_pct", 0.30), 0.30)
+        atr_filter_ok = (atr_pct >= min_atr_pct) if use_atr_filter else True
 
-        if cross_up and trend_ok and momentum_ok and volatility_ok and atr_now > 0:
-            tp_mult = to_float(get_cfg(self.cfg, "strategy.atr_tp_mult", 2.5), 2.5)
-            sl_mult = to_float(get_cfg(self.cfg, "strategy.atr_sl_mult", 1.4), 1.4)
-            return {
-                "close": close_now,
-                "atr": atr_now,
-                "rsi": rsi_now,
-                "atr_pct": atr_pct,
-                "stop_loss": close_now - atr_now * sl_mult,
-                "take_profit": close_now + atr_now * tp_mult,
-            }
+        if sma_ok and rsi_ok and atr_filter_ok and atr_now > 0:
+            tp_mult = to_float(get_cfg(self.cfg, "signals.atr_tp_mult", 3.0), 3.0)
+            sl_mult = to_float(get_cfg(self.cfg, "signals.atr_sl_mult", 1.3), 1.3)
+            return {"close": close_now, "atr": atr_now, "rsi": rsi_now, "atr_pct": atr_pct, "stop_loss": close_now - atr_now * sl_mult, "take_profit": close_now + atr_now * tp_mult}
         return None
 
-    def exit_signal(self, symbol: str, position: Dict[str, Any]) -> Optional[str]:
+    def long_exit_signal(self, symbol: str, position: Dict[str, Any]) -> Optional[str]:
+        bad_news_reason = self.news.forced_exit_reason(symbol)
+        if bad_news_reason:
+            return bad_news_reason
         df = self.fetch_ohlcv_df(symbol)
-        df = enrich_indicators(
-            df,
-            sma_fast=int(get_cfg(self.cfg, "strategy.sma_fast", 20)),
-            sma_slow=int(get_cfg(self.cfg, "strategy.sma_slow", 60)),
-            rsi_len=int(get_cfg(self.cfg, "strategy.rsi_len", 14)),
-            atr_len=int(get_cfg(self.cfg, "strategy.atr_len", 14)),
-        )
+        sma_fast = int(to_float(get_cfg(self.cfg, "signals.sma_fast", 20), 20))
+        sma_slow = int(to_float(get_cfg(self.cfg, "signals.sma_slow", 60), 60))
+        rsi_len = int(to_float(get_cfg(self.cfg, "signals.rsi_len", 14), 14))
+        atr_len = int(to_float(get_cfg(self.cfg, "signals.atr_len", 14), 14))
+        df = enrich_indicators(df, sma_fast, sma_slow, rsi_len, atr_len)
         last = df.iloc[-1]
         price = to_float(last["close"], 0.0)
         fast = to_float(last["sma_fast"], 0.0)
         slow = to_float(last["sma_slow"], 0.0)
+        atr = to_float(last["atr"], 0.0)
         stop_loss = to_float(position.get("stop_loss"), 0.0)
         take_profit = to_float(position.get("take_profit"), 0.0)
-        exit_on_trend_break = to_bool(get_cfg(self.cfg, "strategy.exit_on_trend_break", True), True)
-
-        highest = max(to_float(position.get("highest_price"), 0.0), price)
+        entry_price = to_float(position.get("entry_price"), 0.0)
+        highest = max(to_float(position.get("highest_price", 0.0), 0.0), price)
         position["highest_price"] = highest
 
-        trailing_enabled = to_bool(get_cfg(self.cfg, "strategy.trailing_enabled", True), True)
-        trailing_atr_mult = to_float(get_cfg(self.cfg, "strategy.trailing_atr_mult", 1.2), 1.2)
-        atr = to_float(last["atr"], 0.0)
+        trailing_enabled = to_bool(get_cfg(self.cfg, "signals.trailing_enabled", False), False)
+        trailing_atr_mult = to_float(get_cfg(self.cfg, "signals.trailing_atr_mult", 1.2), 1.2)
         if trailing_enabled and atr > 0 and highest > 0:
             trailing_stop = highest - atr * trailing_atr_mult
             if trailing_stop > stop_loss:
                 position["stop_loss"] = trailing_stop
                 stop_loss = trailing_stop
-
-        entry_price = to_float(position.get("entry_price"), 0.0)
 
         if stop_loss > 0 and price <= stop_loss:
             if stop_loss > entry_price and highest > entry_price:
@@ -694,56 +778,68 @@ class Bot:
             return "stop_loss"
         if take_profit > 0 and price >= take_profit:
             return "take_profit"
-        if exit_on_trend_break and fast < slow:
+        if to_bool(get_cfg(self.cfg, "signals.exit_on_trend_break", False), False) and fast < slow:
             return "trend_break"
         return None
 
-    def place_market_buy(self, symbol: str, stake_quote: float) -> Dict[str, Any]:
-        ticker = self.get_ticker(symbol)
-        ask = to_float(ticker.get("ask"), 0.0)
-        if ask <= 0:
-            raise ValueError(f"Geen geldige ask voor {symbol}")
+    def short_entry_signal(self, symbol: str) -> Optional[Dict[str, Any]]:
+        df = self.fetch_ohlcv_df(symbol)
+        sma_fast = int(to_float(get_cfg(self.cfg, "short.sma_fast", 20), 20))
+        sma_slow = int(to_float(get_cfg(self.cfg, "short.sma_slow", 60), 60))
+        rsi_len = int(to_float(get_cfg(self.cfg, "short.rsi_len", 14), 14))
+        atr_len = int(to_float(get_cfg(self.cfg, "short.atr_len", 14), 14))
+        df = enrich_indicators(df, sma_fast, sma_slow, rsi_len, atr_len)
+        if len(df) < max(sma_slow + 2, 80):
+            return None
+        last = df.iloc[-1]
+        prev = df.iloc[-2]
+        fast_now = to_float(last["sma_fast"], 0.0)
+        slow_now = to_float(last["sma_slow"], 0.0)
+        fast_prev = to_float(prev["sma_fast"], 0.0)
+        slow_prev = to_float(prev["sma_slow"], 0.0)
+        close_now = to_float(last["close"], 0.0)
+        rsi_now = to_float(last["rsi"], 50.0)
+        atr_now = to_float(last["atr"], 0.0)
+        atr_pct = to_float(last["atr_pct"], 0.0)
 
-        amount = self.amount_to_precision_safe(symbol, stake_quote / ask)
-        min_notional = self.market_min_notional(symbol)
-        est_quote = amount * ask
-        if est_quote < min_notional:
-            raise ValueError(f"{symbol} te klein voor minimale orderwaarde. Nodig: {min_notional:.2f} {self.quote}")
+        use_sma = to_bool(get_cfg(self.cfg, "short.use_sma", True), True)
+        use_rsi = to_bool(get_cfg(self.cfg, "short.use_rsi", True), True)
+        use_atr_filter = to_bool(get_cfg(self.cfg, "short.use_atr_filter", True), True)
 
-        if self.dry_run:
-            return {
-                "id": f"drybuy-{int(time.time())}",
-                "symbol": symbol,
-                "price": ask,
-                "amount": amount,
-                "cost": est_quote,
-                "fee": {"cost": est_quote * (to_float(get_cfg(self.cfg, "risk.taker_fee_pct", 0.25), 0.25) / 100.0), "currency": self.quote},
-            }
+        cross_down = fast_prev >= slow_prev and fast_now < slow_now
+        trend_ok = fast_now < slow_now and close_now < fast_now
+        sma_ok = (cross_down and trend_ok) if use_sma else True
+        rsi_max = to_float(get_cfg(self.cfg, "short.rsi_sell_max", 40), 40.0)
+        rsi_ok = (rsi_now <= rsi_max) if use_rsi else True
+        min_atr_pct = to_float(get_cfg(self.cfg, "short.min_atr_pct", 0.30), 0.30)
+        atr_filter_ok = (atr_pct >= min_atr_pct) if use_atr_filter else True
 
-        return self.exchange.create_order(symbol, "market", "buy", amount, None, {"operatorId": self.operator_id})
+        if sma_ok and rsi_ok and atr_filter_ok and atr_now > 0:
+            tp_mult = to_float(get_cfg(self.cfg, "short.atr_tp_mult", 2.3), 2.3)
+            sl_mult = to_float(get_cfg(self.cfg, "short.atr_sl_mult", 1.1), 1.1)
+            return {"close": close_now, "atr": atr_now, "rsi": rsi_now, "atr_pct": atr_pct, "stop_loss": close_now + atr_now * sl_mult, "take_profit": close_now - atr_now * tp_mult}
+        return None
 
-    def place_market_sell(self, symbol: str, amount: float) -> Dict[str, Any]:
-        amount = self.amount_to_precision_safe(symbol, amount)
-        if amount <= 0:
-            raise ValueError("Verkoopamount is 0.")
-
-        ticker = self.get_ticker(symbol)
-        bid = to_float(ticker.get("bid"), 0.0)
-        if bid <= 0:
-            raise ValueError(f"Geen geldige bid voor {symbol}")
-
-        if self.dry_run:
-            est_quote = amount * bid
-            return {
-                "id": f"drysell-{int(time.time())}",
-                "symbol": symbol,
-                "price": bid,
-                "amount": amount,
-                "cost": est_quote,
-                "fee": {"cost": est_quote * (to_float(get_cfg(self.cfg, "risk.taker_fee_pct", 0.25), 0.25) / 100.0), "currency": "EUR"},
-            }
-
-        return self.exchange.create_order(symbol, "market", "sell", amount, None, {"operatorId": self.operator_id})
+    def short_exit_signal(self, symbol: str, position: Dict[str, Any]) -> Optional[str]:
+        df = self.fetch_ohlcv_df(symbol)
+        sma_fast = int(to_float(get_cfg(self.cfg, "short.sma_fast", 20), 20))
+        sma_slow = int(to_float(get_cfg(self.cfg, "short.sma_slow", 60), 60))
+        rsi_len = int(to_float(get_cfg(self.cfg, "short.rsi_len", 14), 14))
+        atr_len = int(to_float(get_cfg(self.cfg, "short.atr_len", 14), 14))
+        df = enrich_indicators(df, sma_fast, sma_slow, rsi_len, atr_len)
+        last = df.iloc[-1]
+        price = to_float(last["close"], 0.0)
+        fast = to_float(last["sma_fast"], 0.0)
+        slow = to_float(last["sma_slow"], 0.0)
+        stop_loss = to_float(position.get("stop_loss"), 0.0)
+        take_profit = to_float(position.get("take_profit"), 0.0)
+        if stop_loss > 0 and price >= stop_loss:
+            return "short_stop_loss"
+        if take_profit > 0 and price <= take_profit:
+            return "short_take_profit"
+        if to_bool(get_cfg(self.cfg, "signals.exit_on_trend_break", False), False) and fast > slow:
+            return "short_trend_break"
+        return None
 
     def order_fee_quote(self, order: Dict[str, Any], fallback_quote_amount: float) -> float:
         fee = order.get("fee")
@@ -756,7 +852,7 @@ class Bot:
                 total += to_float((item or {}).get("cost"), 0.0)
             if total > 0:
                 return total
-        taker_fee_pct = to_float(get_cfg(self.cfg, "risk.taker_fee_pct", 0.25), 0.25)
+        taker_fee_pct = to_float(get_cfg(self.cfg, "taker_fee_pct", 0.25), 0.25)
         return fallback_quote_amount * (taker_fee_pct / 100.0)
 
     def estimated_exit_pnl_quote(self, symbol: str, position: Dict[str, Any], bid_price: Optional[float] = None) -> float:
@@ -765,67 +861,125 @@ class Bot:
             bid_price = to_float(ticker.get("bid"), 0.0)
         amount = to_float(position.get("amount"), 0.0)
         gross_quote = amount * max(bid_price or 0.0, 0.0)
-        taker_fee_pct = to_float(get_cfg(self.cfg, "risk.taker_fee_pct", 0.25), 0.25)
+        taker_fee_pct = to_float(get_cfg(self.cfg, "taker_fee_pct", 0.25), 0.25)
         est_sell_fee = gross_quote * (taker_fee_pct / 100.0)
         entry_quote = to_float(position.get("quote_amount"), 0.0)
         fee_buy_quote = to_float(position.get("fees_buy_quote"), 0.0)
         return gross_quote - est_sell_fee - entry_quote - fee_buy_quote
 
+    def estimated_short_exit_pnl_quote(self, symbol: str, position: Dict[str, Any], ask_price: Optional[float] = None) -> float:
+        if ask_price is None:
+            ticker = self.get_ticker(symbol)
+            ask_price = to_float(ticker.get("ask"), 0.0)
+        amount = to_float(position.get("amount"), 0.0)
+        cover_quote = amount * max(ask_price or 0.0, 0.0)
+        taker_fee_pct = to_float(get_cfg(self.cfg, "taker_fee_pct", 0.25), 0.25)
+        est_cover_fee = cover_quote * (taker_fee_pct / 100.0)
+        entry_quote = to_float(position.get("quote_amount"), 0.0)
+        fee_open_quote = to_float(position.get("fees_open_quote"), 0.0)
+        return entry_quote - fee_open_quote - cover_quote - est_cover_fee
+
+    def rate_limited_hold_log(self, key: str, message: str, *args) -> None:
+        now_ts = utc_now_ts()
+        last_ts = float(self.last_hold_log_ts.get(key, 0.0))
+        if now_ts - last_ts >= 600:
+            LOG.info(message, *args)
+            self.last_hold_log_ts[key] = now_ts
+
     def sell_allowed_by_profit(self, symbol: str, position: Dict[str, Any], reason: str) -> bool:
-        if reason == "stop_loss":
-            return True
-
-        min_profit_eur = to_float(get_cfg(self.cfg, "risk.min_profit_eur", 0.0), 0.0)
-        if min_profit_eur <= 0:
-            return True
-
         ticker = self.get_ticker(symbol)
         bid = to_float(ticker.get("bid"), 0.0)
         if bid <= 0:
             return False
-
         est_pnl = self.estimated_exit_pnl_quote(symbol, position, bid)
+        if reason in {"stop_loss", "bad_news"}:
+            return True
+        if reason == "trailing_stop" and est_pnl <= 0:
+            return True
+        min_profit_eur = to_float(get_cfg(self.cfg, "min_profit_eur", 0.0), 0.0)
+        if min_profit_eur <= 0:
+            return True
         if est_pnl >= min_profit_eur:
             return True
-
-        LOG.info(
-            "HOLD %s | reason=%s | est_pnl=%.4f %s < min_profit=%.4f %s",
-            symbol,
-            reason,
-            est_pnl,
-            self.quote,
-            min_profit_eur,
-            self.quote,
-        )
+        self.rate_limited_hold_log(f"{symbol}:{reason}", "HOLD %s | reason=%s | est_pnl=%.4f %s < min_profit=%.4f %s", symbol, reason, est_pnl, self.quote, min_profit_eur, self.quote)
         return False
 
+    def close_short_allowed_by_profit(self, symbol: str, position: Dict[str, Any], reason: str) -> bool:
+        ticker = self.get_ticker(symbol)
+        ask = to_float(ticker.get("ask"), 0.0)
+        if ask <= 0:
+            return False
+        est_pnl = self.estimated_short_exit_pnl_quote(symbol, position, ask)
+        if reason == "short_stop_loss":
+            return True
+        min_profit_eur = to_float(get_cfg(self.cfg, "min_profit_eur", 0.0), 0.0)
+        if min_profit_eur <= 0:
+            return True
+        if est_pnl >= min_profit_eur:
+            return True
+        self.rate_limited_hold_log(f"short:{symbol}:{reason}", "HOLD SHORT %s | reason=%s | est_pnl=%.4f %s < min_profit=%.4f %s", symbol, reason, est_pnl, self.quote, min_profit_eur, self.quote)
+        return False
+
+    def place_market_buy(self, symbol: str, stake_quote: float) -> Dict[str, Any]:
+        ticker = self.get_ticker(symbol)
+        ask = to_float(ticker.get("ask"), 0.0)
+        if ask <= 0:
+            raise ValueError(f"Geen geldige ask voor {symbol}")
+        amount = self.amount_to_precision_safe(symbol, stake_quote / ask)
+        est_quote = amount * ask
+        min_notional = self.market_min_notional(symbol)
+        if est_quote < min_notional:
+            raise ValueError(f"{symbol} te klein voor minimale orderwaarde. Nodig: {min_notional:.2f} {self.quote}")
+        if self.dry_run:
+            return {"id": f"drybuy-{int(time.time())}", "symbol": symbol, "price": ask, "amount": amount, "filled": amount, "cost": est_quote, "fee": {"cost": est_quote * (to_float(get_cfg(self.cfg, "taker_fee_pct", 0.25), 0.25) / 100.0), "currency": self.quote}}
+        return self.exchange.create_order(symbol, "market", "buy", amount, None, self.order_params())
+
+    def place_market_sell(self, symbol: str, amount: float) -> Dict[str, Any]:
+        amount = self.amount_to_precision_safe(symbol, amount)
+        if amount <= 0:
+            raise ValueError("Verkoop amount is 0.")
+        ticker = self.get_ticker(symbol)
+        bid = to_float(ticker.get("bid"), 0.0)
+        if bid <= 0:
+            raise ValueError(f"Geen geldige bid voor {symbol}")
+        if self.dry_run:
+            est_quote = amount * bid
+            return {"id": f"drysell-{int(time.time())}", "symbol": symbol, "price": bid, "amount": amount, "filled": amount, "cost": est_quote, "fee": {"cost": est_quote * (to_float(get_cfg(self.cfg, "taker_fee_pct", 0.25), 0.25) / 100.0), "currency": self.quote}}
+        return self.exchange.create_order(symbol, "market", "sell", amount, None, self.order_params())
+
     def try_buy_symbol(self, symbol: str) -> None:
+        if not self.spot_enabled():
+            return
         if symbol in self.state["positions"]:
+            return
+        if not self.allow_long_and_short_same_symbol() and symbol in self.state.get("short_positions", {}):
             return
         if self.symbol_in_cooldown(symbol):
             return
-        if self.open_positions_count() >= int(get_cfg(self.cfg, "max_open_positions", 5)):
+        max_open = int(to_float(get_cfg(self.cfg, "max_open_positions", 5), 5))
+        if self.open_positions_count() >= max_open:
             return
-
-        signal = self.entry_signal(symbol)
+        if self.skip_symbol_due_to_existing_balance(symbol):
+            return
+        signal = self.long_entry_signal(symbol)
         if not signal:
             return
+        news_gate = self.news.buy_gate(symbol)
+        if not news_gate.get("allow", False):
+            self.rate_limited_info(self.last_skip_log_ts, f"news:{symbol}:{news_gate.get('reason')}", 1800, "SKIP BUY %s | news_reason=%s", symbol, news_gate.get("reason"))
+            return
+        ticker = self.get_ticker(symbol)
+        spread_pct = self.estimate_spread_pct(ticker)
+        max_spread_pct = to_float(get_cfg(self.cfg, "max_spread_pct", 0.20), 0.20)
+        if spread_pct > max_spread_pct:
+            self.rate_limited_info(self.last_skip_log_ts, f"spread:{symbol}", 1800, "SKIP BUY %s | spread %.3f%% > %.3f%%", symbol, spread_pct, max_spread_pct)
+            return
 
-        fixed_stake = to_float(get_cfg(self.cfg, "fixed_stake_quote", 30), 30.0)
-        budget = self.buy_budget_available()
-        stake = min(fixed_stake, budget)
+        stake = min(to_float(get_cfg(self.cfg, "fixed_stake_quote", 50), 50.0), self.buy_budget_available())
         if stake <= 0:
-            LOG.info("Geen koopruimte meer. Budget beschikbaar: %.2f %s", budget, self.quote)
             return
 
         try:
-            ticker = self.get_ticker(symbol)
-            spread_pct = self.estimate_spread_pct(ticker)
-            max_spread_pct = to_float(get_cfg(self.cfg, "max_spread_pct", 0.35), 0.35)
-            if spread_pct > max_spread_pct:
-                LOG.info("SKIP BUY %s spread %.3f%% > %.3f%%", symbol, spread_pct, max_spread_pct)
-                return
-
             order = self.place_market_buy(symbol, stake)
             price = to_float(order.get("average") or order.get("price") or signal["close"], signal["close"])
             amount = to_float(order.get("filled") or order.get("amount"), 0.0)
@@ -833,6 +987,8 @@ class Bot:
                 amount = self.amount_to_precision_safe(symbol, stake / max(price, 1e-12))
             quote_amount = to_float(order.get("cost"), amount * price)
             fee_quote = self.order_fee_quote(order, quote_amount)
+            news_snapshot = self.news.coin_news(symbol)
+            fear_greed = self.news.fear_greed()
 
             self.state["positions"][symbol] = {
                 "opened_by_bot": True,
@@ -844,39 +1000,28 @@ class Bot:
                 "stop_loss": signal["stop_loss"],
                 "take_profit": signal["take_profit"],
                 "highest_price": price,
+                "news_score_at_entry": news_snapshot.get("news_score", 0.0),
+                "fear_greed_at_entry": fear_greed.get("value"),
             }
             save_state(self.state_file, self.state)
+            self.refresh_balance_cache()
 
-            append_trade_csv(
-                self.trades_file,
-                {
-                    "ts": now_iso(),
-                    "market": symbol,
-                    "side": "BUY",
-                    "price": round(price, 12),
-                    "base_amount": amount,
-                    "quote_amount": round(quote_amount, 8),
-                    "fees_quote": round(fee_quote, 8),
-                    "spread_pct": round(spread_pct, 6),
-                    "net_pnl_quote": "",
-                    "holding_time_min": "",
-                    "reason": "entry_signal",
-                    "dry_run": self.dry_run,
-                },
-            )
+            append_trade_csv(self.trades_file, {
+                "ts": now_iso(),
+                "market": symbol,
+                "side": "BUY",
+                "price": round(price, 12),
+                "base_amount": amount,
+                "quote_amount": round(quote_amount, 8),
+                "fees_quote": round(fee_quote, 8),
+                "spread_pct": round(spread_pct, 6),
+                "net_pnl_quote": "",
+                "holding_time_min": "",
+                "reason": f"entry_signal_news_{news_snapshot.get('news_score', 0.0)}",
+                "dry_run": self.dry_run,
+            })
 
-            LOG.info(
-                "BUY %s | price=%.8f amount=%s quote=%.2f rsi=%.2f atr%%=%.3f stop=%.8f tp=%.8f dry=%s",
-                symbol,
-                price,
-                amount,
-                quote_amount,
-                signal["rsi"],
-                signal["atr_pct"],
-                signal["stop_loss"],
-                signal["take_profit"],
-                self.dry_run,
-            )
+            LOG.info("BUY %s | price=%.8f amount=%s quote=%.2f %s news=%.2f fg=%s rsi=%.2f atr%%=%.3f stop=%.8f tp=%.8f dry=%s", symbol, price, amount, quote_amount, self.quote, to_float(news_snapshot.get("news_score", 0.0), 0.0), fear_greed.get("value"), signal["rsi"], signal["atr_pct"], signal["stop_loss"], signal["take_profit"], self.dry_run)
         except Exception as e:
             LOG.exception("BUY mislukt voor %s: %s", symbol, e)
 
@@ -890,52 +1035,38 @@ class Bot:
             filled_amount = to_float(order.get("filled") or order.get("amount"), amount)
             quote_amount = to_float(order.get("cost"), filled_amount * price)
             fee_sell_quote = self.order_fee_quote(order, quote_amount)
-
             entry_quote = to_float(position.get("quote_amount"), 0.0)
             fee_buy_quote = to_float(position.get("fees_buy_quote"), 0.0)
             net_pnl_quote = quote_amount - fee_sell_quote - entry_quote - fee_buy_quote
             holding_time_min = minutes_since(float(position.get("opened_at", utc_now_ts())))
 
-            self.state["pnl_quote"] = to_float(self.state.get("pnl_quote"), 0.0) + net_pnl_quote
+            self.state["pnl_quote"] = to_float(self.state.get("pnl_quote", 0.0), 0.0) + net_pnl_quote
             self.state["trades"] = int(self.state.get("trades", 0)) + 1
             if net_pnl_quote > 0:
                 self.state["wins"] = int(self.state.get("wins", 0)) + 1
-
             self.state["positions"].pop(symbol, None)
             self.state["cooldown"][symbol] = utc_now_ts()
             save_state(self.state_file, self.state)
+            self.refresh_balance_cache()
 
             ticker = self.get_ticker(symbol)
             spread_pct = self.estimate_spread_pct(ticker)
+            append_trade_csv(self.trades_file, {
+                "ts": now_iso(),
+                "market": symbol,
+                "side": "SELL",
+                "price": round(price, 12),
+                "base_amount": filled_amount,
+                "quote_amount": round(quote_amount, 8),
+                "fees_quote": round(fee_sell_quote, 8),
+                "spread_pct": round(spread_pct, 6),
+                "net_pnl_quote": round(net_pnl_quote, 8),
+                "holding_time_min": round(holding_time_min, 2),
+                "reason": reason,
+                "dry_run": self.dry_run,
+            })
 
-            append_trade_csv(
-                self.trades_file,
-                {
-                    "ts": now_iso(),
-                    "market": symbol,
-                    "side": "SELL",
-                    "price": round(price, 12),
-                    "base_amount": filled_amount,
-                    "quote_amount": round(quote_amount, 8),
-                    "fees_quote": round(fee_sell_quote, 8),
-                    "spread_pct": round(spread_pct, 6),
-                    "net_pnl_quote": round(net_pnl_quote, 8),
-                    "holding_time_min": round(holding_time_min, 2),
-                    "reason": reason,
-                    "dry_run": self.dry_run,
-                },
-            )
-
-            LOG.info(
-                "SELL %s | price=%.8f amount=%s quote=%.2f pnl=%.4f reason=%s dry=%s",
-                symbol,
-                price,
-                filled_amount,
-                quote_amount,
-                net_pnl_quote,
-                reason,
-                self.dry_run,
-            )
+            LOG.info("SELL %s | price=%.8f amount=%s quote=%.2f %s pnl=%.4f %s reason=%s dry=%s", symbol, price, filled_amount, quote_amount, self.quote, net_pnl_quote, self.quote, reason, self.dry_run)
         except Exception as e:
             LOG.exception("SELL mislukt voor %s: %s", symbol, e)
 
@@ -943,56 +1074,122 @@ class Bot:
         positions = list((self.state.get("positions") or {}).items())
         for symbol, position in positions:
             try:
-                reason = self.exit_signal(symbol, position)
+                reason = self.long_exit_signal(symbol, position)
                 save_state(self.state_file, self.state)
                 if reason and self.sell_allowed_by_profit(symbol, position, reason):
                     self.try_sell_symbol(symbol, position, reason)
             except Exception as e:
                 LOG.exception("Positiebeheer mislukt voor %s: %s", symbol, e)
 
+    def open_paper_short(self, symbol: str, signal: Dict[str, Any]) -> None:
+        ticker = self.get_ticker(symbol)
+        bid = to_float(ticker.get("bid"), 0.0)
+        if bid <= 0:
+            return
+        leverage = max(1.0, to_float(get_cfg(self.cfg, "short.leverage", 2), 2.0))
+        margin_per_trade = to_float(get_cfg(self.cfg, "short.margin_per_trade", 30), 30.0)
+        quote_amount = margin_per_trade * leverage
+        amount = self.amount_to_precision_safe(symbol, quote_amount / bid)
+        quote_amount = amount * bid
+        fee_open_quote = quote_amount * (to_float(get_cfg(self.cfg, "taker_fee_pct", 0.25), 0.25) / 100.0)
+        self.state["short_positions"][symbol] = {
+            "paper_only": True,
+            "opened_at": utc_now_ts(),
+            "entry_price": bid,
+            "amount": amount,
+            "margin_quote": margin_per_trade,
+            "leverage": leverage,
+            "quote_amount": quote_amount,
+            "fees_open_quote": fee_open_quote,
+            "stop_loss": signal["stop_loss"],
+            "take_profit": signal["take_profit"],
+        }
+        save_state(self.state_file, self.state)
+        append_trade_csv(self.trades_file, {"ts": now_iso(), "market": symbol, "side": "SHORT_OPEN", "price": round(bid, 12), "base_amount": amount, "quote_amount": round(quote_amount, 8), "fees_quote": round(fee_open_quote, 8), "spread_pct": round(self.estimate_spread_pct(ticker), 6), "net_pnl_quote": "", "holding_time_min": "", "reason": "paper_short_entry", "dry_run": True})
+        LOG.info("PAPER SHORT OPEN %s | price=%.8f amount=%s notional=%.2f %s lev=%.2f", symbol, bid, amount, quote_amount, self.quote, leverage)
+
+    def close_paper_short(self, symbol: str, position: Dict[str, Any], reason: str) -> None:
+        ticker = self.get_ticker(symbol)
+        ask = to_float(ticker.get("ask"), 0.0)
+        if ask <= 0:
+            return
+        amount = to_float(position.get("amount"), 0.0)
+        cover_quote = amount * ask
+        fee_close_quote = cover_quote * (to_float(get_cfg(self.cfg, "taker_fee_pct", 0.25), 0.25) / 100.0)
+        entry_quote = to_float(position.get("quote_amount"), 0.0)
+        fee_open_quote = to_float(position.get("fees_open_quote"), 0.0)
+        net_pnl_quote = entry_quote - fee_open_quote - cover_quote - fee_close_quote
+        holding_time_min = minutes_since(float(position.get("opened_at", utc_now_ts())))
+
+        self.state["short_pnl_quote"] = to_float(self.state.get("short_pnl_quote", 0.0), 0.0) + net_pnl_quote
+        self.state["short_trades"] = int(self.state.get("short_trades", 0)) + 1
+        if net_pnl_quote > 0:
+            self.state["short_wins"] = int(self.state.get("short_wins", 0)) + 1
+        self.state["short_positions"].pop(symbol, None)
+        self.state["short_cooldown"][symbol] = utc_now_ts()
+        save_state(self.state_file, self.state)
+        append_trade_csv(self.trades_file, {"ts": now_iso(), "market": symbol, "side": "SHORT_CLOSE", "price": round(ask, 12), "base_amount": amount, "quote_amount": round(cover_quote, 8), "fees_quote": round(fee_close_quote, 8), "spread_pct": round(self.estimate_spread_pct(ticker), 6), "net_pnl_quote": round(net_pnl_quote, 8), "holding_time_min": round(holding_time_min, 2), "reason": reason, "dry_run": True})
+        LOG.info("PAPER SHORT CLOSE %s | price=%.8f amount=%s pnl=%.4f %s reason=%s", symbol, ask, amount, net_pnl_quote, self.quote, reason)
+
+    def try_open_paper_short(self, symbol: str) -> None:
+        if not self.short_enabled():
+            return
+        if symbol in self.state["short_positions"]:
+            return
+        if self.short_symbol_in_cooldown(symbol):
+            return
+        if not self.allow_long_and_short_same_symbol() and symbol in self.state.get("positions", {}):
+            return
+        signal = self.short_entry_signal(symbol)
+        if not signal:
+            return
+        try:
+            self.open_paper_short(symbol, signal)
+        except Exception as e:
+            LOG.exception("SHORT OPEN mislukt voor %s: %s", symbol, e)
+
+    def manage_open_short_positions(self) -> None:
+        positions = list((self.state.get("short_positions") or {}).items())
+        for symbol, position in positions:
+            try:
+                reason = self.short_exit_signal(symbol, position)
+                if reason and self.close_short_allowed_by_profit(symbol, position, reason):
+                    self.close_paper_short(symbol, position, reason)
+            except Exception as e:
+                LOG.exception("Short positiebeheer mislukt voor %s: %s", symbol, e)
+
     def print_status(self, symbols: List[str]) -> None:
-        every_seconds = int(to_float(get_cfg(self.cfg, "risk.skip_log_every_seconds", 600), 600.0))
+        every_seconds = int(to_float(get_cfg(self.cfg, "skip_log_every_seconds", 600), 600.0))
         now_ts = utc_now_ts()
         if every_seconds > 0 and self.last_status_log_ts > 0 and (now_ts - self.last_status_log_ts) < every_seconds:
             return
         self.last_status_log_ts = now_ts
-
         pnl = to_float(self.state.get("pnl_quote"), 0.0)
         trades = int(self.state.get("trades", 0))
         wins = int(self.state.get("wins", 0))
         winrate = (wins / trades * 100.0) if trades > 0 else 0.0
-
         short_pnl = to_float(self.state.get("short_pnl_quote"), 0.0)
         short_trades = int(self.state.get("short_trades", 0))
         short_wins = int(self.state.get("short_wins", 0))
         short_winrate = (short_wins / short_trades * 100.0) if short_trades > 0 else 0.0
-
-        LOG.info(
-            "STATUS | dry=%s | symbols=%s | spot_open=%s | short_open=%s | invested=%.2f | spot_pnl=%.2f | short_pnl=%.2f | spot_trades=%s | short_trades=%s | spot_winrate=%.1f%% | short_winrate=%.1f%%",
-            self.dry_run,
-            len(symbols),
-            self.open_positions_count(),
-            self.short_positions_count(),
-            self.bot_invested_quote(),
-            pnl,
-            short_pnl,
-            trades,
-            short_trades,
-            winrate,
-            short_winrate,
-        )
+        fg = self.news.fear_greed()
+        LOG.info("STATUS | dry=%s | symbols=%s | spot_open=%s | short_open=%s | invested=%.2f | spot_pnl=%.2f | short_pnl=%.2f | spot_trades=%s | short_trades=%s | spot_winrate=%.1f%% | short_winrate=%.1f%% | fear_greed=%s", self.dry_run, len(symbols), self.open_positions_count(), self.short_positions_count(), self.bot_invested_quote(), pnl, short_pnl, trades, short_trades, winrate, short_winrate, fg.get("value"))
 
     def run_once(self) -> None:
+        self.refresh_balance_cache()
         self.manage_open_positions()
+        self.manage_open_short_positions()
         symbols = self.scanned_symbols()
         self.print_status(symbols)
+        max_open = int(to_float(get_cfg(self.cfg, "max_open_positions", 5), 5))
         for symbol in symbols:
-            if self.open_positions_count() >= int(get_cfg(self.cfg, "max_open_positions", 5)):
-                break
-            self.try_buy_symbol(symbol)
+            if self.open_positions_count() < max_open:
+                self.try_buy_symbol(symbol)
+            if self.short_enabled():
+                self.try_open_paper_short(symbol)
 
     def run_forever(self) -> None:
-        sleep_s = int(get_cfg(self.cfg, "loop_sleep_seconds", 60))
+        sleep_s = int(to_float(get_cfg(self.cfg, "loop_sleep_seconds", 60), 60))
         while True:
             try:
                 self.run_once()
@@ -1001,12 +1198,13 @@ class Bot:
             time.sleep(sleep_s)
 
 
+
 def main() -> None:
     cfg_path = os.getenv("CFG_FILE", "config.yaml")
     cfg = load_yaml(cfg_path)
     setup_logging(str(get_cfg(cfg, "log_level", "INFO")))
     bot = Bot(cfg)
-    LOG.info("Bitvavo trend bot gestart | dry_run=%s", bot.dry_run)
+    LOG.info("Bitvavo news bot gestart | dry_run=%s", bot.dry_run)
     bot.run_forever()
 
 
