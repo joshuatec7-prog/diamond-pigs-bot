@@ -11,7 +11,7 @@ trading:
 
 scanner:
   auto_scan: true
-  top_n_markets: 20
+  top_n_markets: 10
   min_quote_volume: 250000
   exclude_bases:
     - EUR
@@ -59,20 +59,20 @@ fees:
 
 logging:
   level: INFO
-  loop_sleep_seconds: 60
+  loop_sleep_seconds: 300
   candles_limit: 400
 
 news:
   enabled: true
-  cache_minutes: 15
+  cache_minutes: 60
   timespan_hours: 24
-  max_records: 20
+  max_records: 10
 
   use_fear_greed: true
   fear_greed_buy_max: 80
 
-  fail_open: true
-  allow_buy_without_news: true
+  fail_open: false
+  allow_buy_without_news: false
 
   min_news_score_to_buy: 0.0
   bad_news_score_to_exit: -1.5
