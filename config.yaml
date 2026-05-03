@@ -11,8 +11,8 @@ trading:
 
 scanner:
   auto_scan: true
-  top_n_markets: 10
-  min_quote_volume: 250000
+  top_n_markets: 20
+  min_quote_volume: 150000
   exclude_bases:
     - EUR
     - USDT
@@ -25,18 +25,18 @@ signals:
 
   use_rsi: true
   rsi_len: 14
-  rsi_buy_min: 58
-  rsi_buy_max: 72
+  rsi_buy_min: 55
+  rsi_buy_max: 75
 
   use_atr: true
   atr_len: 14
-  atr_tp_mult: 3.0
-  atr_sl_mult: 1.3
+  atr_tp_mult: 2.6
+  atr_sl_mult: 1.2
 
   exit_on_trend_break: false
 
   use_atr_filter: true
-  min_atr_pct: 0.30
+  min_atr_pct: 0.20
 
   trailing_enabled: true
   trailing_atr_mult: 1.2
@@ -46,11 +46,11 @@ risk:
   fixed_stake_quote: 50
   max_open_positions: 5
   only_buy_if_not_in_position: true
-  cooldown_minutes: 60
-  max_spread_pct: 0.20
+  cooldown_minutes: 45
+  max_spread_pct: 0.25
   eur_reserve: 55
   skip_log_every_seconds: 600
-  min_profit_eur: 0.75
+  min_profit_eur: 0.50
   avoid_symbols_with_existing_balance: false
   existing_balance_dust: 5
 
@@ -69,13 +69,13 @@ news:
   max_records: 10
 
   use_fear_greed: true
-  fear_greed_buy_max: 80
+  fear_greed_buy_max: 85
 
   fail_open: false
-  allow_buy_without_news: false
+  allow_buy_without_news: true
 
-  min_news_score_to_buy: 0.0
-  bad_news_score_to_exit: -1.5
+  min_news_score_to_buy: -0.5
+  bad_news_score_to_exit: -2.0
 
   block_on_severe_negative: true
   force_exit_on_severe_negative: true
