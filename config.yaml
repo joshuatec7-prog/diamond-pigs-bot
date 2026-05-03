@@ -87,6 +87,8 @@ news:
     PEPE: "pepe coin"
     ENA: "ethena"
     WLD: "worldcoin"
+    ORCA: "orca crypto"
+    ONDO: "ondo finance"
 
 short:
   leverage: 2
