@@ -68,6 +68,8 @@ SYMBOL_NAME_MAP = {
     "WLD": "worldcoin",
     "HYPE": "hyperliquid",
     "ZKJ": "polyhedra",
+    "ONDO": "ondo finance",
+    "ORCA": "orca crypto",
 }
 
 POSITIVE_TITLE_WORDS = {
@@ -140,15 +142,12 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
 
-
 def utc_now_ts() -> float:
     return time.time()
 
 
-
 def minutes_since(ts: float) -> float:
     return max(0.0, (utc_now_ts() - ts) / 60.0)
-
 
 
 def to_bool(v: Any, default: bool = False) -> bool:
@@ -164,7 +163,6 @@ def to_bool(v: Any, default: bool = False) -> bool:
     return default
 
 
-
 def to_float(v: Any, default: float = 0.0) -> float:
     if v is None or v == "":
         return default
@@ -177,10 +175,8 @@ def to_float(v: Any, default: float = 0.0) -> float:
         return default
 
 
-
 def ensure_parent(path_str: str) -> None:
     Path(path_str).parent.mkdir(parents=True, exist_ok=True)
-
 
 
 def default_state() -> Dict[str, Any]:
@@ -198,7 +194,6 @@ def default_state() -> Dict[str, Any]:
     }
 
 
-
 def load_state(path_str: str) -> Dict[str, Any]:
     p = Path(path_str)
     if not p.exists():
@@ -210,20 +205,19 @@ def load_state(path_str: str) -> Dict[str, Any]:
             return default_state()
     except Exception:
         return default_state()
+
     base = default_state()
     base.update(data)
-    for k in ["positions", "cooldown", "short_positions", "short_cooldown"]:
-        if not isinstance(base.get(k), dict):
-            base[k] = {}
+    for key in ["positions", "cooldown", "short_positions", "short_cooldown"]:
+        if not isinstance(base.get(key), dict):
+            base[key] = {}
     return base
-
 
 
 def save_state(path_str: str, state: Dict[str, Any]) -> None:
     ensure_parent(path_str)
     with open(path_str, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2, ensure_ascii=False)
-
 
 
 def append_trade_csv(path_str: str, row: Dict[str, Any]) -> None:
@@ -236,14 +230,12 @@ def append_trade_csv(path_str: str, row: Dict[str, Any]) -> None:
         writer.writerow({k: row.get(k, "") for k in TRADE_CSV_COLUMNS})
 
 
-
 def load_yaml(path_str: str) -> Dict[str, Any]:
     with open(path_str, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
     if not isinstance(data, dict):
         raise ValueError("Config moet een YAML dictionary zijn.")
     return data
-
 
 
 def setup_logging(level: str = "INFO") -> None:
@@ -253,7 +245,6 @@ def setup_logging(level: str = "INFO") -> None:
     )
 
 
-
 def _get_path(cfg: Dict[str, Any], path: str, default: Any = None) -> Any:
     cur = cfg
     for part in path.split("."):
@@ -261,7 +252,6 @@ def _get_path(cfg: Dict[str, Any], path: str, default: Any = None) -> Any:
             return default
         cur = cur[part]
     return cur
-
 
 
 def get_cfg(cfg: Dict[str, Any], path: str, default: Any = None) -> Any:
@@ -275,7 +265,6 @@ def get_cfg(cfg: Dict[str, Any], path: str, default: Any = None) -> Any:
     return default
 
 
-
 def normalize_symbol(symbol: str, quote: str) -> str:
     s = str(symbol).strip().upper()
     q = str(quote).strip().upper()
@@ -287,7 +276,6 @@ def normalize_symbol(symbol: str, quote: str) -> str:
     return f"{s}/{q}"
 
 
-
 def compute_rsi(series: pd.Series, length: int = 14) -> pd.Series:
     delta = series.diff()
     gain = delta.clip(lower=0)
@@ -297,7 +285,6 @@ def compute_rsi(series: pd.Series, length: int = 14) -> pd.Series:
     rs = avg_gain / avg_loss.replace(0, 1e-12)
     rsi = 100 - (100 / (1 + rs))
     return rsi.fillna(50)
-
 
 
 def compute_atr(df: pd.DataFrame, length: int = 14) -> pd.Series:
@@ -313,7 +300,6 @@ def compute_atr(df: pd.DataFrame, length: int = 14) -> pd.Series:
     return tr.ewm(alpha=1 / length, adjust=False, min_periods=length).mean()
 
 
-
 def enrich_indicators(df: pd.DataFrame, sma_fast: int, sma_slow: int, rsi_len: int, atr_len: int) -> pd.DataFrame:
     out = df.copy()
     out["sma_fast"] = out["close"].rolling(sma_fast).mean()
@@ -324,7 +310,6 @@ def enrich_indicators(df: pd.DataFrame, sma_fast: int, sma_slow: int, rsi_len: i
     return out
 
 
-
 def http_get_json(url: str, timeout: int = 20) -> Any:
     req = urllib.request.Request(
         url,
@@ -333,10 +318,23 @@ def http_get_json(url: str, timeout: int = 20) -> Any:
             "Accept": "application/json,text/plain,*/*",
         },
     )
+
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         raw = resp.read()
-    return json.loads(raw.decode("utf-8", errors="replace"))
+        content_type = str(resp.headers.get("Content-Type", "")).lower()
 
+    text = raw.decode("utf-8", errors="replace").strip()
+
+    if not text:
+        raise ValueError("lege response van nieuwsbron")
+    if text.startswith("<"):
+        raise ValueError(f"html response van nieuwsbron ({content_type})")
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as e:
+        snippet = text[:200].replace("\n", " ")
+        raise ValueError(f"ongeldige json response: {snippet}") from e
 
 
 class NewsEngine:
@@ -373,6 +371,7 @@ class NewsEngine:
             return {"value": None, "classification": "disabled"}
         if utc_now_ts() - float(self.fng_cache.get("ts", 0.0)) < self.cache_ttl_sec and self.fng_cache.get("value") is not None:
             return {"value": self.fng_cache.get("value"), "classification": self.fng_cache.get("classification", "unknown")}
+
         try:
             data = http_get_json("https://api.alternative.me/fng/?limit=1&format=json", timeout=15)
             row = ((data or {}).get("data") or [{}])[0]
@@ -397,13 +396,16 @@ class NewsEngine:
         }
         url = "https://api.gdeltproject.org/api/v2/doc/doc?" + urllib.parse.urlencode(params)
         data = http_get_json(url, timeout=20)
+
         if isinstance(data, dict):
             for key in ["articles", "data", "results"]:
-                if isinstance(data.get(key), list):
-                    return data.get(key) or []
+                value = data.get(key)
+                if isinstance(value, list):
+                    return value
         if isinstance(data, list):
             return data
-        return []
+
+        raise ValueError("nieuwsbron gaf geen bruikbare artikellijst terug")
 
     def title_sentiment_score(self, text: str) -> float:
         t = str(text or "").lower()
@@ -426,11 +428,23 @@ class NewsEngine:
 
     def coin_news(self, symbol: str) -> Dict[str, Any]:
         if not self.enabled:
-            return {"term": None, "article_count": 0, "news_score": 0.0, "severe_negative_count": 0, "titles": [], "ok": True}
+            return {
+                "term": None,
+                "article_count": 0,
+                "news_score": 0.0,
+                "severe_negative_count": 0,
+                "titles": [],
+                "ok": True,
+            }
+
         cached = self._cache_get(symbol)
         if cached is not None:
             return cached
+
         term = self.news_term_for_symbol(symbol)
+        stale_item = self.cache.get(symbol)
+        stale_value = stale_item.get("value") if isinstance(stale_item, dict) else None
+
         try:
             articles = self.gdelt_articles(term)
             titles: List[str] = []
@@ -440,6 +454,7 @@ class NewsEngine:
                 if title:
                     titles.append(title)
                     score += self.title_sentiment_score(title)
+
             result = {
                 "term": term,
                 "article_count": len(titles),
@@ -450,13 +465,24 @@ class NewsEngine:
             }
             return self._cache_set(symbol, result)
         except Exception as e:
-            LOG.warning("News ophalen mislukt voor %s: %s", symbol, e)
-            result = {"term": term, "article_count": 0, "news_score": 0.0, "severe_negative_count": 0, "titles": [], "ok": False}
+            LOG.warning("Nieuws ophalen mislukt voor %s: %s", symbol, e)
+            if isinstance(stale_value, dict):
+                LOG.info("Gebruik oude nieuwscache voor %s", symbol)
+                return stale_value
+            result = {
+                "term": term,
+                "article_count": 0,
+                "news_score": 0.0,
+                "severe_negative_count": 0,
+                "titles": [],
+                "ok": False,
+            }
             return self._cache_set(symbol, result)
 
     def buy_gate(self, symbol: str) -> Dict[str, Any]:
         if not self.enabled:
             return {"allow": True, "reason": "news_disabled"}
+
         fail_open = to_bool(get_cfg(self.cfg, "news.fail_open", True), True)
         allow_without_news = to_bool(get_cfg(self.cfg, "news.allow_buy_without_news", True), True)
         min_score = to_float(get_cfg(self.cfg, "news.min_news_score_to_buy", 0.0), 0.0)
@@ -470,12 +496,13 @@ class NewsEngine:
         news = self.coin_news(symbol)
         if not news.get("ok", False) and not fail_open:
             return {"allow": False, "reason": "news_fetch_failed"}
-        if news.get("severe_negative_count", 0) > 0 and block_on_severe:
+        if int(news.get("severe_negative_count", 0)) > 0 and block_on_severe:
             return {"allow": False, "reason": "severe_negative_news"}
         if int(news.get("article_count", 0)) == 0 and not allow_without_news:
             return {"allow": False, "reason": "no_news"}
         if to_float(news.get("news_score", 0.0), 0.0) < min_score:
             return {"allow": False, "reason": f"news_score_below_min:{news.get('news_score')}"}
+
         return {"allow": True, "reason": f"news_ok:{news.get('news_score')}", "news": news, "fear_greed": fng}
 
     def forced_exit_reason(self, symbol: str) -> Optional[str]:
@@ -484,12 +511,12 @@ class NewsEngine:
         news = self.coin_news(symbol)
         min_bad = to_float(get_cfg(self.cfg, "news.bad_news_score_to_exit", -1.5), -1.5)
         severe_force = to_bool(get_cfg(self.cfg, "news.force_exit_on_severe_negative", True), True)
+
         if severe_force and int(news.get("severe_negative_count", 0)) > 0:
             return "bad_news"
         if to_float(news.get("news_score", 0.0), 0.0) <= min_bad and int(news.get("article_count", 0)) > 0:
             return "bad_news"
         return None
-
 
 
 class Bot:
@@ -603,9 +630,11 @@ class Bot:
         manual = get_cfg(self.cfg, "symbols", []) or []
         if manual:
             return [normalize_symbol(str(s), self.quote) for s in manual]
+
         auto_scan = to_bool(get_cfg(self.cfg, "scanner.auto_scan", False), False)
         if not auto_scan:
             return []
+
         top_n = int(to_float(get_cfg(self.cfg, "scanner.top_n_markets", 20), 20))
         min_quote_volume = to_float(get_cfg(self.cfg, "scanner.min_quote_volume", 250000), 250000.0)
         max_spread_pct = to_float(get_cfg(self.cfg, "max_spread_pct", 0.20), 0.20)
@@ -692,7 +721,7 @@ class Bot:
             bucket[key] = now_ts
 
     def skip_symbol_due_to_existing_balance(self, symbol: str) -> bool:
-        avoid_existing = to_bool(get_cfg(self.cfg, "risk.avoid_symbols_with_existing_balance", True), True)
+        avoid_existing = to_bool(get_cfg(self.cfg, "risk.avoid_symbols_with_existing_balance", False), False)
         if not avoid_existing:
             return False
         market = self.exchange.market(symbol)
@@ -700,7 +729,15 @@ class Bot:
         dust = to_float(get_cfg(self.cfg, "risk.existing_balance_dust", 0.00000001), 0.00000001)
         base_balance = self.asset_balance(base)
         if base_balance > dust:
-            self.rate_limited_info(self.last_skip_log_ts, f"existing:{symbol}", 3600, "SKIP BUY %s | bestaande %s balance=%.12f", symbol, base, base_balance)
+            self.rate_limited_info(
+                self.last_skip_log_ts,
+                f"existing:{symbol}",
+                3600,
+                "OVERSLAAN KOPEN %s | bestaande %s-saldo=%.12f",
+                symbol,
+                base,
+                base_balance,
+            )
             return True
         return False
 
@@ -713,6 +750,7 @@ class Bot:
         df = enrich_indicators(df, sma_fast, sma_slow, rsi_len, atr_len)
         if len(df) < max(sma_slow + 2, 80):
             return None
+
         last = df.iloc[-1]
         prev = df.iloc[-2]
         fast_now = to_float(last["sma_fast"], 0.0)
@@ -731,22 +769,32 @@ class Bot:
         cross_up = fast_prev <= slow_prev and fast_now > slow_now
         trend_ok = fast_now > slow_now and close_now > fast_now
         sma_ok = (cross_up and trend_ok) if use_sma else True
-        rsi_min = to_float(get_cfg(self.cfg, "signals.rsi_buy_min", 58), 58.0)
-        rsi_max = to_float(get_cfg(self.cfg, "signals.rsi_buy_max", 72), 72.0)
+
+        rsi_min = to_float(get_cfg(self.cfg, "signals.rsi_buy_min", 55), 55.0)
+        rsi_max = to_float(get_cfg(self.cfg, "signals.rsi_buy_max", 75), 75.0)
         rsi_ok = (rsi_min <= rsi_now <= rsi_max) if use_rsi else True
-        min_atr_pct = to_float(get_cfg(self.cfg, "signals.min_atr_pct", 0.30), 0.30)
+
+        min_atr_pct = to_float(get_cfg(self.cfg, "signals.min_atr_pct", 0.20), 0.20)
         atr_filter_ok = (atr_pct >= min_atr_pct) if use_atr_filter else True
 
         if sma_ok and rsi_ok and atr_filter_ok and atr_now > 0:
-            tp_mult = to_float(get_cfg(self.cfg, "signals.atr_tp_mult", 3.0), 3.0)
-            sl_mult = to_float(get_cfg(self.cfg, "signals.atr_sl_mult", 1.3), 1.3)
-            return {"close": close_now, "atr": atr_now, "rsi": rsi_now, "atr_pct": atr_pct, "stop_loss": close_now - atr_now * sl_mult, "take_profit": close_now + atr_now * tp_mult}
+            tp_mult = to_float(get_cfg(self.cfg, "signals.atr_tp_mult", 2.6), 2.6)
+            sl_mult = to_float(get_cfg(self.cfg, "signals.atr_sl_mult", 1.2), 1.2)
+            return {
+                "close": close_now,
+                "atr": atr_now,
+                "rsi": rsi_now,
+                "atr_pct": atr_pct,
+                "stop_loss": close_now - atr_now * sl_mult,
+                "take_profit": close_now + atr_now * tp_mult,
+            }
         return None
 
     def long_exit_signal(self, symbol: str, position: Dict[str, Any]) -> Optional[str]:
         bad_news_reason = self.news.forced_exit_reason(symbol)
         if bad_news_reason:
             return bad_news_reason
+
         df = self.fetch_ohlcv_df(symbol)
         sma_fast = int(to_float(get_cfg(self.cfg, "signals.sma_fast", 20), 20))
         sma_slow = int(to_float(get_cfg(self.cfg, "signals.sma_slow", 60), 60))
@@ -754,6 +802,7 @@ class Bot:
         atr_len = int(to_float(get_cfg(self.cfg, "signals.atr_len", 14), 14))
         df = enrich_indicators(df, sma_fast, sma_slow, rsi_len, atr_len)
         last = df.iloc[-1]
+
         price = to_float(last["close"], 0.0)
         fast = to_float(last["sma_fast"], 0.0)
         slow = to_float(last["sma_slow"], 0.0)
@@ -764,7 +813,7 @@ class Bot:
         highest = max(to_float(position.get("highest_price", 0.0), 0.0), price)
         position["highest_price"] = highest
 
-        trailing_enabled = to_bool(get_cfg(self.cfg, "signals.trailing_enabled", False), False)
+        trailing_enabled = to_bool(get_cfg(self.cfg, "signals.trailing_enabled", True), True)
         trailing_atr_mult = to_float(get_cfg(self.cfg, "signals.trailing_atr_mult", 1.2), 1.2)
         if trailing_enabled and atr > 0 and highest > 0:
             trailing_stop = highest - atr * trailing_atr_mult
@@ -791,6 +840,7 @@ class Bot:
         df = enrich_indicators(df, sma_fast, sma_slow, rsi_len, atr_len)
         if len(df) < max(sma_slow + 2, 80):
             return None
+
         last = df.iloc[-1]
         prev = df.iloc[-2]
         fast_now = to_float(last["sma_fast"], 0.0)
@@ -817,7 +867,14 @@ class Bot:
         if sma_ok and rsi_ok and atr_filter_ok and atr_now > 0:
             tp_mult = to_float(get_cfg(self.cfg, "short.atr_tp_mult", 2.3), 2.3)
             sl_mult = to_float(get_cfg(self.cfg, "short.atr_sl_mult", 1.1), 1.1)
-            return {"close": close_now, "atr": atr_now, "rsi": rsi_now, "atr_pct": atr_pct, "stop_loss": close_now + atr_now * sl_mult, "take_profit": close_now - atr_now * tp_mult}
+            return {
+                "close": close_now,
+                "atr": atr_now,
+                "rsi": rsi_now,
+                "atr_pct": atr_pct,
+                "stop_loss": close_now + atr_now * sl_mult,
+                "take_profit": close_now - atr_now * tp_mult,
+            }
         return None
 
     def short_exit_signal(self, symbol: str, position: Dict[str, Any]) -> Optional[str]:
@@ -901,7 +958,16 @@ class Bot:
             return True
         if est_pnl >= min_profit_eur:
             return True
-        self.rate_limited_hold_log(f"{symbol}:{reason}", "HOLD %s | reason=%s | est_pnl=%.4f %s < min_profit=%.4f %s", symbol, reason, est_pnl, self.quote, min_profit_eur, self.quote)
+        self.rate_limited_hold_log(
+            f"{symbol}:{reason}",
+            "HOLD %s | reason=%s | est_pnl=%.4f %s < min_profit=%.4f %s",
+            symbol,
+            reason,
+            est_pnl,
+            self.quote,
+            min_profit_eur,
+            self.quote,
+        )
         return False
 
     def close_short_allowed_by_profit(self, symbol: str, position: Dict[str, Any], reason: str) -> bool:
@@ -917,7 +983,16 @@ class Bot:
             return True
         if est_pnl >= min_profit_eur:
             return True
-        self.rate_limited_hold_log(f"short:{symbol}:{reason}", "HOLD SHORT %s | reason=%s | est_pnl=%.4f %s < min_profit=%.4f %s", symbol, reason, est_pnl, self.quote, min_profit_eur, self.quote)
+        self.rate_limited_hold_log(
+            f"short:{symbol}:{reason}",
+            "HOLD SHORT %s | reason=%s | est_pnl=%.4f %s < min_profit=%.4f %s",
+            symbol,
+            reason,
+            est_pnl,
+            self.quote,
+            min_profit_eur,
+            self.quote,
+        )
         return False
 
     def place_market_buy(self, symbol: str, stake_quote: float) -> Dict[str, Any]:
@@ -931,7 +1006,18 @@ class Bot:
         if est_quote < min_notional:
             raise ValueError(f"{symbol} te klein voor minimale orderwaarde. Nodig: {min_notional:.2f} {self.quote}")
         if self.dry_run:
-            return {"id": f"drybuy-{int(time.time())}", "symbol": symbol, "price": ask, "amount": amount, "filled": amount, "cost": est_quote, "fee": {"cost": est_quote * (to_float(get_cfg(self.cfg, "taker_fee_pct", 0.25), 0.25) / 100.0), "currency": self.quote}}
+            return {
+                "id": f"drybuy-{int(time.time())}",
+                "symbol": symbol,
+                "price": ask,
+                "amount": amount,
+                "filled": amount,
+                "cost": est_quote,
+                "fee": {
+                    "cost": est_quote * (to_float(get_cfg(self.cfg, "taker_fee_pct", 0.25), 0.25) / 100.0),
+                    "currency": self.quote,
+                },
+            }
         return self.exchange.create_order(symbol, "market", "buy", amount, None, self.order_params())
 
     def place_market_sell(self, symbol: str, amount: float) -> Dict[str, Any]:
@@ -944,7 +1030,18 @@ class Bot:
             raise ValueError(f"Geen geldige bid voor {symbol}")
         if self.dry_run:
             est_quote = amount * bid
-            return {"id": f"drysell-{int(time.time())}", "symbol": symbol, "price": bid, "amount": amount, "filled": amount, "cost": est_quote, "fee": {"cost": est_quote * (to_float(get_cfg(self.cfg, "taker_fee_pct", 0.25), 0.25) / 100.0), "currency": self.quote}}
+            return {
+                "id": f"drysell-{int(time.time())}",
+                "symbol": symbol,
+                "price": bid,
+                "amount": amount,
+                "filled": amount,
+                "cost": est_quote,
+                "fee": {
+                    "cost": est_quote * (to_float(get_cfg(self.cfg, "taker_fee_pct", 0.25), 0.25) / 100.0),
+                    "currency": self.quote,
+                },
+            }
         return self.exchange.create_order(symbol, "market", "sell", amount, None, self.order_params())
 
     def try_buy_symbol(self, symbol: str) -> None:
@@ -956,23 +1053,42 @@ class Bot:
             return
         if self.symbol_in_cooldown(symbol):
             return
+
         max_open = int(to_float(get_cfg(self.cfg, "max_open_positions", 5), 5))
         if self.open_positions_count() >= max_open:
             return
         if self.skip_symbol_due_to_existing_balance(symbol):
             return
+
         signal = self.long_entry_signal(symbol)
         if not signal:
             return
+
         news_gate = self.news.buy_gate(symbol)
         if not news_gate.get("allow", False):
-            self.rate_limited_info(self.last_skip_log_ts, f"news:{symbol}:{news_gate.get('reason')}", 1800, "SKIP BUY %s | news_reason=%s", symbol, news_gate.get("reason"))
+            self.rate_limited_info(
+                self.last_skip_log_ts,
+                f"news:{symbol}:{news_gate.get('reason')}",
+                1800,
+                "OVERSLAAN KOPEN %s | news_reason=%s",
+                symbol,
+                news_gate.get("reason"),
+            )
             return
+
         ticker = self.get_ticker(symbol)
         spread_pct = self.estimate_spread_pct(ticker)
-        max_spread_pct = to_float(get_cfg(self.cfg, "max_spread_pct", 0.20), 0.20)
+        max_spread_pct = to_float(get_cfg(self.cfg, "max_spread_pct", 0.25), 0.25)
         if spread_pct > max_spread_pct:
-            self.rate_limited_info(self.last_skip_log_ts, f"spread:{symbol}", 1800, "SKIP BUY %s | spread %.3f%% > %.3f%%", symbol, spread_pct, max_spread_pct)
+            self.rate_limited_info(
+                self.last_skip_log_ts,
+                f"spread:{symbol}",
+                1800,
+                "OVERSLAAN KOPEN %s | spread %.3f%% > %.3f%%",
+                symbol,
+                spread_pct,
+                max_spread_pct,
+            )
             return
 
         stake = min(to_float(get_cfg(self.cfg, "fixed_stake_quote", 50), 50.0), self.buy_budget_available())
@@ -1006,24 +1122,41 @@ class Bot:
             save_state(self.state_file, self.state)
             self.refresh_balance_cache()
 
-            append_trade_csv(self.trades_file, {
-                "ts": now_iso(),
-                "market": symbol,
-                "side": "BUY",
-                "price": round(price, 12),
-                "base_amount": amount,
-                "quote_amount": round(quote_amount, 8),
-                "fees_quote": round(fee_quote, 8),
-                "spread_pct": round(spread_pct, 6),
-                "net_pnl_quote": "",
-                "holding_time_min": "",
-                "reason": f"entry_signal_news_{news_snapshot.get('news_score', 0.0)}",
-                "dry_run": self.dry_run,
-            })
+            append_trade_csv(
+                self.trades_file,
+                {
+                    "ts": now_iso(),
+                    "market": symbol,
+                    "side": "BUY",
+                    "price": round(price, 12),
+                    "base_amount": amount,
+                    "quote_amount": round(quote_amount, 8),
+                    "fees_quote": round(fee_quote, 8),
+                    "spread_pct": round(spread_pct, 6),
+                    "net_pnl_quote": "",
+                    "holding_time_min": "",
+                    "reason": f"entry_signal_news_{news_snapshot.get('news_score', 0.0)}",
+                    "dry_run": self.dry_run,
+                },
+            )
 
-            LOG.info("BUY %s | price=%.8f amount=%s quote=%.2f %s news=%.2f fg=%s rsi=%.2f atr%%=%.3f stop=%.8f tp=%.8f dry=%s", symbol, price, amount, quote_amount, self.quote, to_float(news_snapshot.get("news_score", 0.0), 0.0), fear_greed.get("value"), signal["rsi"], signal["atr_pct"], signal["stop_loss"], signal["take_profit"], self.dry_run)
+            LOG.info(
+                "KOOP %s | prijs=%.8f bedrag=%s koers=%.2f %s nieuws=%.2f fg=%s rsi=%.2f atr%%=%.3f stop=%.8f tp=%.8f dry=%s",
+                symbol,
+                price,
+                amount,
+                quote_amount,
+                self.quote,
+                to_float(news_snapshot.get("news_score", 0.0), 0.0),
+                fear_greed.get("value"),
+                signal["rsi"],
+                signal["atr_pct"],
+                signal["stop_loss"],
+                signal["take_profit"],
+                self.dry_run,
+            )
         except Exception as e:
-            LOG.exception("BUY mislukt voor %s: %s", symbol, e)
+            LOG.exception("KOOP mislukt voor %s: %s", symbol, e)
 
     def try_sell_symbol(self, symbol: str, position: Dict[str, Any], reason: str) -> None:
         if not to_bool(position.get("opened_by_bot"), False):
@@ -1051,24 +1184,38 @@ class Bot:
 
             ticker = self.get_ticker(symbol)
             spread_pct = self.estimate_spread_pct(ticker)
-            append_trade_csv(self.trades_file, {
-                "ts": now_iso(),
-                "market": symbol,
-                "side": "SELL",
-                "price": round(price, 12),
-                "base_amount": filled_amount,
-                "quote_amount": round(quote_amount, 8),
-                "fees_quote": round(fee_sell_quote, 8),
-                "spread_pct": round(spread_pct, 6),
-                "net_pnl_quote": round(net_pnl_quote, 8),
-                "holding_time_min": round(holding_time_min, 2),
-                "reason": reason,
-                "dry_run": self.dry_run,
-            })
+            append_trade_csv(
+                self.trades_file,
+                {
+                    "ts": now_iso(),
+                    "market": symbol,
+                    "side": "SELL",
+                    "price": round(price, 12),
+                    "base_amount": filled_amount,
+                    "quote_amount": round(quote_amount, 8),
+                    "fees_quote": round(fee_sell_quote, 8),
+                    "spread_pct": round(spread_pct, 6),
+                    "net_pnl_quote": round(net_pnl_quote, 8),
+                    "holding_time_min": round(holding_time_min, 2),
+                    "reason": reason,
+                    "dry_run": self.dry_run,
+                },
+            )
 
-            LOG.info("SELL %s | price=%.8f amount=%s quote=%.2f %s pnl=%.4f %s reason=%s dry=%s", symbol, price, filled_amount, quote_amount, self.quote, net_pnl_quote, self.quote, reason, self.dry_run)
+            LOG.info(
+                "VERKOOP %s | prijs=%.8f amount=%s quote=%.2f %s pnl=%.4f %s reden=%s dry=%s",
+                symbol,
+                price,
+                filled_amount,
+                quote_amount,
+                self.quote,
+                net_pnl_quote,
+                self.quote,
+                reason,
+                self.dry_run,
+            )
         except Exception as e:
-            LOG.exception("SELL mislukt voor %s: %s", symbol, e)
+            LOG.exception("VERKOOP mislukt voor %s: %s", symbol, e)
 
     def manage_open_positions(self) -> None:
         positions = list((self.state.get("positions") or {}).items())
@@ -1092,6 +1239,7 @@ class Bot:
         amount = self.amount_to_precision_safe(symbol, quote_amount / bid)
         quote_amount = amount * bid
         fee_open_quote = quote_amount * (to_float(get_cfg(self.cfg, "taker_fee_pct", 0.25), 0.25) / 100.0)
+
         self.state["short_positions"][symbol] = {
             "paper_only": True,
             "opened_at": utc_now_ts(),
@@ -1105,8 +1253,32 @@ class Bot:
             "take_profit": signal["take_profit"],
         }
         save_state(self.state_file, self.state)
-        append_trade_csv(self.trades_file, {"ts": now_iso(), "market": symbol, "side": "SHORT_OPEN", "price": round(bid, 12), "base_amount": amount, "quote_amount": round(quote_amount, 8), "fees_quote": round(fee_open_quote, 8), "spread_pct": round(self.estimate_spread_pct(ticker), 6), "net_pnl_quote": "", "holding_time_min": "", "reason": "paper_short_entry", "dry_run": True})
-        LOG.info("PAPER SHORT OPEN %s | price=%.8f amount=%s notional=%.2f %s lev=%.2f", symbol, bid, amount, quote_amount, self.quote, leverage)
+        append_trade_csv(
+            self.trades_file,
+            {
+                "ts": now_iso(),
+                "market": symbol,
+                "side": "SHORT_OPEN",
+                "price": round(bid, 12),
+                "base_amount": amount,
+                "quote_amount": round(quote_amount, 8),
+                "fees_quote": round(fee_open_quote, 8),
+                "spread_pct": round(self.estimate_spread_pct(ticker), 6),
+                "net_pnl_quote": "",
+                "holding_time_min": "",
+                "reason": "paper_short_entry",
+                "dry_run": True,
+            },
+        )
+        LOG.info(
+            "PAPER SHORT OPEN %s | prijs=%.8f amount=%s notional=%.2f %s lev=%.2f",
+            symbol,
+            bid,
+            amount,
+            quote_amount,
+            self.quote,
+            leverage,
+        )
 
     def close_paper_short(self, symbol: str, position: Dict[str, Any], reason: str) -> None:
         ticker = self.get_ticker(symbol)
@@ -1128,8 +1300,32 @@ class Bot:
         self.state["short_positions"].pop(symbol, None)
         self.state["short_cooldown"][symbol] = utc_now_ts()
         save_state(self.state_file, self.state)
-        append_trade_csv(self.trades_file, {"ts": now_iso(), "market": symbol, "side": "SHORT_CLOSE", "price": round(ask, 12), "base_amount": amount, "quote_amount": round(cover_quote, 8), "fees_quote": round(fee_close_quote, 8), "spread_pct": round(self.estimate_spread_pct(ticker), 6), "net_pnl_quote": round(net_pnl_quote, 8), "holding_time_min": round(holding_time_min, 2), "reason": reason, "dry_run": True})
-        LOG.info("PAPER SHORT CLOSE %s | price=%.8f amount=%s pnl=%.4f %s reason=%s", symbol, ask, amount, net_pnl_quote, self.quote, reason)
+        append_trade_csv(
+            self.trades_file,
+            {
+                "ts": now_iso(),
+                "market": symbol,
+                "side": "SHORT_CLOSE",
+                "price": round(ask, 12),
+                "base_amount": amount,
+                "quote_amount": round(cover_quote, 8),
+                "fees_quote": round(fee_close_quote, 8),
+                "spread_pct": round(self.estimate_spread_pct(ticker), 6),
+                "net_pnl_quote": round(net_pnl_quote, 8),
+                "holding_time_min": round(holding_time_min, 2),
+                "reason": reason,
+                "dry_run": True,
+            },
+        )
+        LOG.info(
+            "PAPER SHORT CLOSE %s | prijs=%.8f amount=%s pnl=%.4f %s reden=%s",
+            symbol,
+            ask,
+            amount,
+            net_pnl_quote,
+            self.quote,
+            reason,
+        )
 
     def try_open_paper_short(self, symbol: str) -> None:
         if not self.short_enabled():
@@ -1164,16 +1360,33 @@ class Bot:
         if every_seconds > 0 and self.last_status_log_ts > 0 and (now_ts - self.last_status_log_ts) < every_seconds:
             return
         self.last_status_log_ts = now_ts
-        pnl = to_float(self.state.get("pnl_quote"), 0.0)
+
+        pnl = to_float(self.state.get("pnl_quote", 0.0), 0.0)
         trades = int(self.state.get("trades", 0))
         wins = int(self.state.get("wins", 0))
         winrate = (wins / trades * 100.0) if trades > 0 else 0.0
-        short_pnl = to_float(self.state.get("short_pnl_quote"), 0.0)
+
+        short_pnl = to_float(self.state.get("short_pnl_quote", 0.0), 0.0)
         short_trades = int(self.state.get("short_trades", 0))
         short_wins = int(self.state.get("short_wins", 0))
         short_winrate = (short_wins / short_trades * 100.0) if short_trades > 0 else 0.0
         fg = self.news.fear_greed()
-        LOG.info("STATUS | dry=%s | symbols=%s | spot_open=%s | short_open=%s | invested=%.2f | spot_pnl=%.2f | short_pnl=%.2f | spot_trades=%s | short_trades=%s | spot_winrate=%.1f%% | short_winrate=%.1f%% | fear_greed=%s", self.dry_run, len(symbols), self.open_positions_count(), self.short_positions_count(), self.bot_invested_quote(), pnl, short_pnl, trades, short_trades, winrate, short_winrate, fg.get("value"))
+
+        LOG.info(
+            "STATUS | droog=%s | symbolen=%s | spot_open=%s | short_open=%s | geïnvesteerd=%.2f | spot_pnl=%.2f | short_pnl=%.2f | spot_trades=%s | short_trades=%s | spot_winrate=%.1f%% | short_winrate=%.1f%% | fear_greed=%s",
+            self.dry_run,
+            len(symbols),
+            self.open_positions_count(),
+            self.short_positions_count(),
+            self.bot_invested_quote(),
+            pnl,
+            short_pnl,
+            trades,
+            short_trades,
+            winrate,
+            short_winrate,
+            fg.get("value"),
+        )
 
     def run_once(self) -> None:
         self.refresh_balance_cache()
@@ -1189,7 +1402,7 @@ class Bot:
                 self.try_open_paper_short(symbol)
 
     def run_forever(self) -> None:
-        sleep_s = int(to_float(get_cfg(self.cfg, "loop_sleep_seconds", 60), 60))
+        sleep_s = int(to_float(get_cfg(self.cfg, "loop_sleep_seconds", 300), 300))
         while True:
             try:
                 self.run_once()
@@ -1198,13 +1411,12 @@ class Bot:
             time.sleep(sleep_s)
 
 
-
 def main() -> None:
     cfg_path = os.getenv("CFG_FILE", "config.yaml")
     cfg = load_yaml(cfg_path)
     setup_logging(str(get_cfg(cfg, "log_level", "INFO")))
     bot = Bot(cfg)
-    LOG.info("Bitvavo news bot gestart | dry_run=%s", bot.dry_run)
+    LOG.info("Bitvavo nieuwsbot gestart | dry_run=%s", bot.dry_run)
     bot.run_forever()
 
 
