@@ -11,8 +11,8 @@ trading:
 
 scanner:
   auto_scan: true
-  top_n_markets: 20
-  min_quote_volume: 150000
+  top_n_markets: 8
+  min_quote_volume: 200000
   exclude_bases:
     - EUR
     - USDT
@@ -38,6 +38,7 @@ signals:
 
 risk:
   dry_run: true
+  simulated_quote_balance: 400
   fixed_stake_quote: 50
   max_open_positions: 5
   only_buy_if_not_in_position: true
@@ -82,6 +83,8 @@ news:
     ORCA: "orca crypto"
     ONDO: "ondo finance"
     CHIP: "chip crypto"
+    XVG: "verge crypto"
+    ARB: "arbitrum"
 
 short:
   leverage: 2
