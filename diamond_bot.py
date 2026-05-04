@@ -71,6 +71,8 @@ SYMBOL_NAME_MAP = {
     "ONDO": "ondo finance",
     "ORCA": "orca crypto",
     "CHIP": "chip crypto",
+    "XVG": "verge crypto",
+    "ARB": "arbitrum",
 }
 
 POSITIVE_TITLE_WORDS = {
@@ -367,8 +369,13 @@ class NewsEngine:
     def fear_greed(self) -> Dict[str, Any]:
         if not self.enabled or not to_bool(get_cfg(self.cfg, "news.use_fear_greed", True), True):
             return {"value": None, "classification": "disabled"}
+
         if utc_now_ts() - float(self.fng_cache.get("ts", 0.0)) < self.cache_ttl_sec and self.fng_cache.get("value") is not None:
-            return {"value": self.fng_cache.get("value"), "classification": self.fng_cache.get("classification", "unknown")}
+            return {
+                "value": self.fng_cache.get("value"),
+                "classification": self.fng_cache.get("classification", "unknown"),
+            }
+
         try:
             data = http_get_json("https://api.alternative.me/fng/?limit=1&format=json", timeout=15)
             row = ((data or {}).get("data") or [{}])[0]
@@ -460,7 +467,6 @@ class NewsEngine:
                 "ok": True,
             }
             return self._cache_set(symbol, result)
-
         except Exception as e:
             LOG.warning("Nieuws ophalen mislukt voor %s: %s", symbol, e)
             if isinstance(stale_value, dict):
@@ -558,15 +564,21 @@ class Bot:
         return {}
 
     def safe_fetch_balance(self) -> Dict[str, Any]:
-        if self.dry_run and (not self.api_key or not self.api_secret):
-            simulated_quote = to_float(get_cfg(self.cfg, "risk.simulated_quote_balance", 1000), 1000.0)
-            return {"free": {self.quote: simulated_quote}, "total": {self.quote: simulated_quote}}
+        simulated_quote = to_float(get_cfg(self.cfg, "risk.simulated_quote_balance", 1000), 1000.0)
+
+        if self.dry_run:
+            return {
+                "free": {self.quote: simulated_quote},
+                "total": {self.quote: simulated_quote},
+            }
+
         for i in range(3):
             try:
                 return self.exchange.fetch_balance()
             except Exception as e:
                 LOG.warning("fetch_balance poging %s mislukt: %s", i + 1, e)
                 time.sleep(1.5 * (i + 1))
+
         raise RuntimeError("Kon saldo niet ophalen.")
 
     def refresh_balance_cache(self) -> None:
@@ -630,8 +642,8 @@ class Bot:
         if not auto_scan:
             return []
 
-        top_n = int(to_float(get_cfg(self.cfg, "scanner.top_n_markets", 20), 20))
-        min_quote_volume = to_float(get_cfg(self.cfg, "scanner.min_quote_volume", 150000), 150000.0)
+        top_n = int(to_float(get_cfg(self.cfg, "scanner.top_n_markets", 8), 8))
+        min_quote_volume = to_float(get_cfg(self.cfg, "scanner.min_quote_volume", 200000), 200000.0)
         max_spread_pct = to_float(get_cfg(self.cfg, "max_spread_pct", 0.25), 0.25)
         exclude_bases = {str(x).upper() for x in (get_cfg(self.cfg, "scanner.exclude_bases", ["EUR", "USDT", "USDC"]) or [])}
 
@@ -1342,6 +1354,7 @@ class Bot:
         self.state["short_trades"] = int(self.state.get("short_trades", 0)) + 1
         if net_pnl_quote > 0:
             self.state["short_wins"] = int(self.state.get("short_wins", 0)) + 1
+
         self.state["short_positions"].pop(symbol, None)
         self.state["short_cooldown"][symbol] = utc_now_ts()
         save_state(self.state_file, self.state)
@@ -1417,7 +1430,7 @@ class Bot:
         fg = self.news.fear_greed()
 
         LOG.info(
-            "STATUS | droog=%s | symbolen=%s | spot_open=%s | korte_open=%s | vooraf=%.2f | spot_pnl=%.2f | short_pnl=%.2f | spot_trades=%s | short_trades=%s | spot_winrate=%.1f%% | short_winrate=%.1f%% | angst_greed=%s",
+            "STATUS | droog=%s | symbolen=%s | spot_open=%s | korte_open=%s | vooraf=%.2f | spot_pnl=%.2f | korte_pnl=%.2f | spot_trades=%s | short_trades=%s | spot_winrate=%.1f%% | short_winrate=%.1f%% | angst_greed=%s",
             self.dry_run,
             len(symbols),
             self.open_positions_count(),
