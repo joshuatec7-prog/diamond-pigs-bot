@@ -35,19 +35,24 @@ signals:
   min_atr_pct: 0.20
   trailing_enabled: true
   trailing_atr_mult: 1.2
+  # Harde stop-loss van 7% onder aankoopprijs (ongeacht ATR)
+  hard_stop_loss_pct: 7.0
+  # Bij 20%+ winst: strakke 5% trailing stop (laat winst doorlopen)
+  profit_trailing_trigger_pct: 20.0
+  profit_trailing_pullback_pct: 5.0
 
 risk:
   dry_run: true
   simulated_quote_balance: 400
-  fixed_stake_quote: 50
+  fixed_stake_quote: 40        # was 50, nu €40 per trade
   max_open_positions: 5
   only_buy_if_not_in_position: true
   cooldown_minutes: 45
   max_spread_pct: 0.25
-  eur_reserve: 55
+  eur_reserve: 50              # was 55, nu €50 minimum buffer
   skip_log_every_seconds: 600
   min_profit_eur: 0.50
-  avoid_symbols_with_existing_balance: false
+  avoid_symbols_with_existing_balance: true   # beschermt bestaande coins
   existing_balance_dust: 5
 
 fees:
@@ -72,7 +77,6 @@ news:
   bad_news_score_to_exit: -2.0
   block_on_severe_negative: true
   force_exit_on_severe_negative: true
-
   aliases:
     FET: "fetch ai"
     TAO: "bittensor"
