@@ -565,21 +565,21 @@ class Bot:
 
     def safe_fetch_balance(self) -> Dict[str, Any]:
         simulated_quote = to_float(get_cfg(self.cfg, "risk.simulated_quote_balance", 1000), 1000.0)
-
         if self.dry_run:
             return {
                 "free": {self.quote: simulated_quote},
                 "total": {self.quote: simulated_quote},
             }
 
+        last_error = None
         for i in range(3):
             try:
                 return self.exchange.fetch_balance()
             except Exception as e:
+                last_error = e
                 LOG.warning("fetch_balance poging %s mislukt: %s", i + 1, e)
                 time.sleep(1.5 * (i + 1))
-
-        raise RuntimeError("Kon saldo niet ophalen.")
+        raise RuntimeError(f"Kon saldo niet ophalen: {last_error}")
 
     def refresh_balance_cache(self) -> None:
         try:
@@ -603,15 +603,33 @@ class Bot:
     def fetch_ohlcv_df(self, symbol: str) -> pd.DataFrame:
         timeframe = str(get_cfg(self.cfg, "timeframe", "15m"))
         limit = int(to_float(get_cfg(self.cfg, "candles_limit", 400), 400))
-        rows = self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-        df = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"])
-        if df.empty:
-            raise ValueError(f"Geen candles voor {symbol}")
-        df["ts"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
-        return df
+        last_error = None
+
+        for i in range(4):
+            try:
+                rows = self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+                df = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"])
+                if df.empty:
+                    raise ValueError(f"Geen candles voor {symbol}")
+                df["ts"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
+                return df
+            except Exception as e:
+                last_error = e
+                LOG.warning("fetch_ohlcv poging %s mislukt voor %s: %s", i + 1, symbol, e)
+                time.sleep(2 * (i + 1))
+
+        raise RuntimeError(f"Kon candles niet ophalen voor {symbol}: {last_error}")
 
     def get_ticker(self, symbol: str) -> Dict[str, Any]:
-        return self.exchange.fetch_ticker(symbol)
+        last_error = None
+        for i in range(4):
+            try:
+                return self.exchange.fetch_ticker(symbol)
+            except Exception as e:
+                last_error = e
+                LOG.warning("fetch_ticker poging %s mislukt voor %s: %s", i + 1, symbol, e)
+                time.sleep(2 * (i + 1))
+        raise RuntimeError(f"Kon ticker niet ophalen voor {symbol}: {last_error}")
 
     def market_min_notional(self, symbol: str) -> float:
         m = self.exchange.market(symbol)
@@ -812,25 +830,26 @@ class Bot:
             if self.skip_symbol_due_to_existing_balance(symbol):
                 continue
 
-            signal = self.long_entry_signal(symbol)
-            if not signal:
-                continue
-
-            ticker = self.get_ticker(symbol)
-            spread_pct = self.estimate_spread_pct(ticker)
-            max_spread_pct = to_float(get_cfg(self.cfg, "max_spread_pct", 0.25), 0.25)
-            if spread_pct > max_spread_pct:
-                continue
-
-            candidates.append(
-                {
-                    "symbol": symbol,
-                    "signal": signal,
-                    "ticker": ticker,
-                    "spread_pct": spread_pct,
-                    "tech_score": to_float(signal.get("tech_score", 0.0), 0.0),
-                }
-            )
+            try:
+                signal = self.long_entry_signal(symbol)
+                if not signal:
+                    continue
+                ticker = self.get_ticker(symbol)
+                spread_pct = self.estimate_spread_pct(ticker)
+                max_spread_pct = to_float(get_cfg(self.cfg, "max_spread_pct", 0.25), 0.25)
+                if spread_pct > max_spread_pct:
+                    continue
+                candidates.append(
+                    {
+                        "symbol": symbol,
+                        "signal": signal,
+                        "ticker": ticker,
+                        "spread_pct": spread_pct,
+                        "tech_score": to_float(signal.get("tech_score", 0.0), 0.0),
+                    }
+                )
+            except Exception as e:
+                LOG.warning("Kandidaat overgeslagen voor %s door marktdatafout: %s", symbol, e)
 
         candidates.sort(key=lambda x: x["tech_score"], reverse=True)
         return candidates
@@ -1283,7 +1302,7 @@ class Bot:
                 if reason and self.sell_allowed_by_profit(symbol, position, reason):
                     self.try_sell_symbol(symbol, position, reason)
             except Exception as e:
-                LOG.exception("Positiebeheer mislukt voor %s: %s", symbol, e)
+                LOG.warning("Positiebeheer overgeslagen voor %s door marktdatafout: %s", symbol, e)
 
     def open_paper_short(self, symbol: str, signal: Dict[str, Any]) -> None:
         ticker = self.get_ticker(symbol)
@@ -1410,7 +1429,7 @@ class Bot:
                 if reason and self.close_short_allowed_by_profit(symbol, position, reason):
                     self.close_paper_short(symbol, position, reason)
             except Exception as e:
-                LOG.exception("Short positiebeheer mislukt voor %s: %s", symbol, e)
+                LOG.warning("Short positiebeheer overgeslagen voor %s door marktdatafout: %s", symbol, e)
 
     def print_status(self, symbols: List[str]) -> None:
         every_seconds = int(to_float(get_cfg(self.cfg, "skip_log_every_seconds", 600), 600.0))
