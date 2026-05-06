@@ -43,7 +43,7 @@ signals:
   profit_trailing_pullback_pct: 5.0
 
 risk:
-  dry_run: true
+  dry_run: false
   simulated_quote_balance: 400
   fixed_stake_quote: 40        # was 50, nu €40 per trade
   max_open_positions: 5
