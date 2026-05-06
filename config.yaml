@@ -66,13 +66,13 @@ logging:
 
 news:
   enabled: true
-  cache_minutes: 180
+  cache_minutes: 360           # was 180, minder API calls
   timespan_hours: 24
   max_records: 5
   top_n_for_news_check: 3
   use_fear_greed: true
   fear_greed_buy_max: 85
-  fail_open: false
+  fail_open: true              # was false, koopt nu ook als nieuws ophalen mislukt
   allow_buy_without_news: true
   min_news_score_to_buy: -0.5
   bad_news_score_to_exit: -2.0
