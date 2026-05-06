@@ -11,7 +11,7 @@ trading:
 
 scanner:
   auto_scan: true
-  top_n_markets: 8
+  top_n_markets: 25
   min_quote_volume: 200000
   exclude_bases:
     - EUR
@@ -35,6 +35,7 @@ signals:
   min_atr_pct: 0.20
   trailing_enabled: true
   trailing_atr_mult: 1.2
+  require_crossover: false      # geen crossover vereist, alleen trend omhoog
   # Harde stop-loss van 7% onder aankoopprijs (ongeacht ATR)
   hard_stop_loss_pct: 7.0
   # Bij 20%+ winst: strakke 5% trailing stop (laat winst doorlopen)
@@ -42,7 +43,7 @@ signals:
   profit_trailing_pullback_pct: 5.0
 
 risk:
-  dry_run: false
+  dry_run: true
   simulated_quote_balance: 400
   fixed_stake_quote: 40        # was 50, nu €40 per trade
   max_open_positions: 5
