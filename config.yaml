@@ -1,59 +1,110 @@
-#!/bin/bash
-CSV="${1:-transactions.csv}"
+quote: EUR
+timeframe: "15m"
 
-if [ ! -f "$CSV" ]; then
-  echo "Bestand niet gevonden: $CSV"
-  exit 1
-fi
+trading:
+  enable_spot: true
+  enable_short_signals: false
+  enable_auto_short: false
+  max_total_positions: 5
+  allow_long_and_short_same_symbol: false
 
-python3 - "$CSV" << 'PYEOF'
-import csv, sys
+scanner:
+  auto_scan: true
+  top_n_markets: 15
+  min_quote_volume: 500000
+  exclude_bases:
+    - EUR
+    - USDT
+    - USDC
 
-file = sys.argv[1]
-trades = 0
-wins = 0
-losses = 0
-total_pnl = 0.0
-open_positions = {}
+signals:
+  use_sma: true
+  sma_fast: 20
+  sma_slow: 60
+  use_rsi: true
+  rsi_len: 14
+  rsi_buy_min: 58
+  rsi_buy_max: 72
+  use_atr: true
+  atr_len: 14
+  atr_tp_mult: 2.6
+  atr_sl_mult: 1.2
+  exit_on_trend_break: false
+  use_atr_filter: true
+  min_atr_pct: 0.30
+  trailing_enabled: true
+  trailing_atr_mult: 1.2
+  require_crossover: false
+  hard_stop_loss_pct: 7.0
+  profit_trailing_trigger_pct: 20.0
+  profit_trailing_pullback_pct: 5.0
 
-with open(file, newline='', encoding='utf-8') as f:
-    reader = csv.DictReader(f)
-    for row in reader:
-        side = row.get('side', '').upper()
-        symbol = row.get('market', '')
-        price = float(row.get('price') or 0)
-        amount = float(row.get('base_amount') or 0)
-        quote = float(row.get('quote_amount') or 0)
-        pnl = row.get('net_pnl_quote', '')
-        reason = row.get('reason', '')
+risk:
+  dry_run: false
+  simulated_quote_balance: 400
+  fixed_stake_quote: 40
+  max_open_positions: 5
+  only_buy_if_not_in_position: true
+  cooldown_minutes: 90
+  max_spread_pct: 0.20
+  eur_reserve: 50
+  skip_log_every_seconds: 600
+  min_profit_eur: 0.50
+  avoid_symbols_with_existing_balance: false
+  existing_balance_dust: 5
 
-        if side == 'BUY':
-            open_positions[symbol] = {'quote': quote, 'amount': amount, 'price': price}
+fees:
+  taker_fee_pct: 0.25
 
-        elif side == 'SELL':
-            trades += 1
-            if pnl:
-                p = float(pnl)
-                total_pnl += p
-                if p > 0:
-                    wins += 1
-                else:
-                    losses += 1
+logging:
+  level: INFO
+  loop_sleep_seconds: 600
+  candles_limit: 400
 
-losses_calc = trades - wins
-winrate = (wins / trades * 100) if trades > 0 else 0
+news:
+  enabled: true
+  cache_minutes: 360
+  timespan_hours: 24
+  max_records: 5
+  top_n_for_news_check: 3
+  use_fear_greed: true
+  fear_greed_buy_max: 85
+  fail_open: true
+  allow_buy_without_news: true
+  min_news_score_to_buy: -0.5
+  bad_news_score_to_exit: -2.0
+  block_on_severe_negative: true
+  force_exit_on_severe_negative: true
+  aliases:
+    FET: "fetch ai"
+    TAO: "bittensor"
+    WIF: "dogwifhat"
+    PEPE: "pepe coin"
+    ENA: "ethena"
+    WLD: "worldcoin"
+    ORCA: "orca crypto"
+    ONDO: "ondo finance"
+    CHIP: "chip crypto"
+    XVG: "verge crypto"
+    ARB: "arbitrum"
 
-print("=" * 50)
-print(f"  TRADES OVERZICHT")
-print("=" * 50)
-print(f"  Totaal gesloten trades : {trades}")
-print(f"  Winst trades           : {wins}")
-print(f"  Verlies trades         : {losses_calc}")
-print(f"  Winrate                : {winrate:.1f}%")
-print(f"  Totaal PnL             : {total_pnl:+.2f} EUR")
-print("-" * 50)
-print(f"  Open posities          : {len(open_positions)}")
-for sym, pos in open_positions.items():
-    print(f"    {sym:<15} gekocht voor {pos['quote']:.2f} EUR @ {pos['price']:.6f}")
-print("=" * 50)
-PYEOF
+short:
+  leverage: 2
+  margin_per_trade: 30
+  cooldown_minutes: 60
+  use_sma: true
+  sma_fast: 20
+  sma_slow: 60
+  use_rsi: true
+  rsi_len: 14
+  rsi_sell_max: 40
+  use_atr: true
+  atr_len: 14
+  atr_tp_mult: 2.3
+  atr_sl_mult: 1.1
+  use_atr_filter: true
+  min_atr_pct: 0.30
+
+files:
+  state_file: state.json
+  trades_file: transactions.csv
