@@ -433,8 +433,9 @@ class Bot:
                 return self.exchange.fetch_balance()
             except Exception as e:
                 last_error = e
-                LOG.warning("fetch_balance poging %s mislukt: %s", i + 1, e)
+                LOG.debug("fetch_balance poging %s mislukt: %s", i + 1, e)
                 time.sleep(1.5 * (i + 1))
+        LOG.warning("fetch_balance mislukt na 3 pogingen: %s", last_error)
         raise RuntimeError(f"Kon saldo niet ophalen: {last_error}")
 
     def refresh_balance_cache(self) -> None:
@@ -599,7 +600,7 @@ class Bot:
         (buiten de bot om gekocht), slaan we dit symbol over voor kopen.
         Bij verkopen wordt dit ook gerespecteerd via opened_by_bot flag.
         """
-        avoid_existing = to_bool(get_cfg(self.cfg, "risk.avoid_symbols_with_existing_balance", True), True)
+        avoid_existing = to_bool(get_cfg(self.cfg, "risk.avoid_symbols_with_existing_balance", False), False)
         if not avoid_existing:
             return False
         market = self.exchange.market(symbol)
@@ -644,7 +645,11 @@ class Bot:
 
         cross_up = fast_prev <= slow_prev and fast_now > slow_now
         trend_ok = fast_now > slow_now and close_now > fast_now
-        sma_ok = (cross_up and trend_ok) if use_sma else True
+        require_crossover = to_bool(get_cfg(self.cfg, "signals.require_crossover", False), False)
+        if use_sma:
+            sma_ok = (cross_up and trend_ok) if require_crossover else trend_ok
+        else:
+            sma_ok = True
 
         rsi_min = to_float(get_cfg(self.cfg, "signals.rsi_buy_min", 55), 55.0)
         rsi_max = to_float(get_cfg(self.cfg, "signals.rsi_buy_max", 75), 75.0)
