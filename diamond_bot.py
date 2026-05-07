@@ -424,8 +424,8 @@ class Bot:
         })
         self.exchange.load_markets()
         self.news = NewsEngine(cfg, self.exchange)
-        if not self.dry_run:
-            self._sync_positions_from_balance()
+        # Sync uitgeschakeld - bestaande coins worden niet als posities geladen
+        # Bot beheert alleen posities die hij zelf opent
 
     def _sync_positions_from_balance(self) -> None:
         """Bij opstart: laad echte Bitvavo saldi in state als posities ontbreken."""
