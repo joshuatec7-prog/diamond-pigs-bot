@@ -279,6 +279,8 @@ class NewsEngine:
             return {"value": None, "classification": "unknown"}
 
     def gdelt_articles(self, term: str) -> List[Dict[str, Any]]:
+        # Kleine vertraging om 429 rate-limit te voorkomen
+        time.sleep(2.0)
         hours = int(to_float(get_cfg(self.cfg, "news.timespan_hours", 24), 24))
         max_records = int(to_float(get_cfg(self.cfg, "news.max_records", 5), 5))
         params = {
@@ -417,6 +419,53 @@ class Bot:
         })
         self.exchange.load_markets()
         self.news = NewsEngine(cfg, self.exchange)
+        if not self.dry_run:
+            self._sync_positions_from_balance()
+
+    def _sync_positions_from_balance(self) -> None:
+        """Bij opstart: laad echte Bitvavo saldi in state als posities ontbreken."""
+        if self.state.get("positions"):
+            return  # state heeft al posities, niet overschrijven
+        try:
+            balance = self.exchange.fetch_balance()
+            dust = to_float(get_cfg(self.cfg, "risk.existing_balance_dust", 5), 5.0)
+            tickers = self.exchange.fetch_tickers()
+            synced = 0
+            for asset, bal in (balance.get("total") or {}).items():
+                if asset == self.quote:
+                    continue
+                sym = f"{asset}/{self.quote}"
+                if sym not in self.exchange.markets:
+                    continue
+                amount = to_float(bal, 0.0)
+                if amount <= 0:
+                    continue
+                ticker = tickers.get(sym) or {}
+                price = to_float(ticker.get("last"), 0.0)
+                if price <= 0:
+                    continue
+                eur_value = amount * price
+                if eur_value < dust:
+                    continue
+                # Voeg toe als bestaande positie (opened_by_bot=False zodat hij niet verkoopt)
+                self.state["positions"][sym] = {
+                    "opened_by_bot": False,
+                    "opened_at": utc_now_ts(),
+                    "entry_price": price,
+                    "amount": amount,
+                    "quote_amount": eur_value,
+                    "fees_buy_quote": 0.0,
+                    "stop_loss": 0.0,
+                    "take_profit": 0.0,
+                    "highest_price": price,
+                    "synced_from_balance": True,
+                }
+                synced += 1
+            if synced > 0:
+                save_state(self.state_file, self.state)
+                LOG.info("SYNC: %s bestaande posities geladen uit Bitvavo saldo", synced)
+        except Exception as e:
+            LOG.warning("Kon posities niet synchroniseren: %s", e)
 
     def order_params(self) -> Dict[str, Any]:
         if self.operator_id:
