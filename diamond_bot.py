@@ -146,10 +146,15 @@ def append_trade_csv(path_str: str, row: Dict[str, Any]) -> None:
 
 def load_yaml(path_str: str) -> Dict[str, Any]:
     with open(path_str, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
+        raw = f.read()
+    try:
+        data = yaml.safe_load(raw) or {}
+    except yaml.YAMLError as e:
+        raise ValueError(f"YAML fout in {path_str}: {e}")
     if not isinstance(data, dict):
         raise ValueError("Config moet een YAML dictionary zijn.")
     return data
+
 
 def setup_logging(level: str = "INFO") -> None:
     logging.basicConfig(
