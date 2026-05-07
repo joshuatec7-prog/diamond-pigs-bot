@@ -55,7 +55,7 @@ logging:
   loop_sleep_seconds: 600
   candles_limit: 400
 news:
-  enabled: true
+  enabled: false
   cache_minutes: 360
   timespan_hours: 24
   max_records: 5
