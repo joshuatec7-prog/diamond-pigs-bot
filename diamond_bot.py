@@ -1174,6 +1174,9 @@ class Bot:
     def manage_open_positions(self) -> None:
         positions = list((self.state.get("positions") or {}).items())
         for symbol, position in positions:
+            # Sla posities over die niet door de bot zijn gekocht
+            if not to_bool(position.get("opened_by_bot"), False):
+                continue
             try:
                 reason = self.long_exit_signal(symbol, position)
                 save_state(self.state_file, self.state)
