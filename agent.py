@@ -98,32 +98,43 @@ def analyze(trades):
     changes = {}
 
     # Te veel stop losses → stop verder weg zetten
-    if sl_rate > 0.60:
-        new_sl = min(float(sigs.get("atr_sl_mult", 1.2)) + 0.2, LIMITS["atr_sl_mult"][1])
-        new_hard = min(float(sigs.get("hard_stop_loss_pct", 7.0)) + 1.0, LIMITS["hard_stop_loss_pct"][1])
+    if sl_rate > 0.50:
+        stap = 0.4 if sl_rate > 0.70 else 0.2
+        new_sl = min(float(sigs.get("atr_sl_mult", 1.2)) + stap, LIMITS["atr_sl_mult"][1])
+        new_hard = min(float(sigs.get("hard_stop_loss_pct", 7.0)) + 2.0, LIMITS["hard_stop_loss_pct"][1])
         changes["atr_sl_mult"] = round(new_sl, 2)
         changes["hard_stop_loss_pct"] = round(new_hard, 1)
-        LOG.info("Veel stop losses → atr_sl_mult=%.2f hard_stop=%.1f%%", new_sl, new_hard)
+        LOG.info("Veel stop losses (%.0f%%) → atr_sl_mult=%.2f hard_stop=%.1f%%", sl_rate*100, new_sl, new_hard)
 
-    # Winrate te laag → instapfilters aanscherpen
+    # Winrate te laag → instapfilters flink aanscherpen
     if winrate < 0.35:
-        new_rsi_min = min(float(sigs.get("rsi_buy_min", 58)) + 2, LIMITS["rsi_buy_min"][1])
-        new_atr     = min(float(sigs.get("min_atr_pct", 0.30)) + 0.05, LIMITS["min_atr_pct"][1])
+        stap_rsi = 3 if winrate < 0.25 else 2
+        stap_atr = 0.10 if winrate < 0.25 else 0.05
+        new_rsi_min = min(float(sigs.get("rsi_buy_min", 58)) + stap_rsi, LIMITS["rsi_buy_min"][1])
+        new_atr     = min(float(sigs.get("min_atr_pct", 0.30)) + stap_atr, LIMITS["min_atr_pct"][1])
         changes["rsi_buy_min"] = round(new_rsi_min, 1)
         changes["min_atr_pct"] = round(new_atr, 2)
-        LOG.info("Lage winrate → rsi_buy_min=%.1f min_atr_pct=%.2f", new_rsi_min, new_atr)
+        LOG.info("Lage winrate (%.0f%%) → rsi_buy_min=%.1f min_atr_pct=%.2f", winrate*100, new_rsi_min, new_atr)
 
     # Winrate goed → filters iets versoepelen voor meer trades
     if winrate > 0.55 and total >= 10:
         new_rsi_min = max(float(sigs.get("rsi_buy_min", 58)) - 1, LIMITS["rsi_buy_min"][0])
         changes["rsi_buy_min"] = round(new_rsi_min, 1)
-        LOG.info("Goede winrate → rsi_buy_min iets lager: %.1f", new_rsi_min)
+        LOG.info("Goede winrate (%.0f%%) → rsi_buy_min iets lager: %.1f", winrate*100, new_rsi_min)
 
     # Gemiddelde winst klein → take profit hoger zetten
     if avg_win < 1.0 and tp_rate > 0.2:
-        new_tp = min(float(sigs.get("atr_tp_mult", 2.6)) + 0.2, LIMITS["atr_tp_mult"][1])
+        new_tp = min(float(sigs.get("atr_tp_mult", 2.6)) + 0.3, LIMITS["atr_tp_mult"][1])
         changes["atr_tp_mult"] = round(new_tp, 2)
-        LOG.info("Kleine winsten → atr_tp_mult=%.2f", new_tp)
+        LOG.info("Kleine winsten (%.2f EUR) → atr_tp_mult=%.2f", avg_win, new_tp)
+
+    # Verlies/winst ratio slecht → cooldown verhogen
+    if winrate < 0.30 and total >= 10:
+        risk = load_config().get("risk", {})
+        new_cooldown = min(int(risk.get("cooldown_minutes", 90)) + 30, 240)
+        cfg["risk"]["cooldown_minutes"] = new_cooldown
+        changes["cooldown_minutes"] = new_cooldown
+        LOG.info("Slechte ratio → cooldown=%s min", new_cooldown)
 
     return changes
 
