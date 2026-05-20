@@ -302,4 +302,3 @@ class GridBot:
 if __name__ == "__main__":
     bot = GridBot()
     bot.run()
-    
