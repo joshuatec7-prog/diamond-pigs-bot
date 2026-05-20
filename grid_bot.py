@@ -31,8 +31,8 @@ TRADES_FILE = "/opt/render/project/src/grid_transactions.csv"
 
 GRID_COINS     = ["BTC/EUR", "ETH/EUR"]
 STAKE_PER_COIN = 125.0  # totaal per coin
-GRID_LEVELS    = 5      # aantal levels
-RANGE_PCT      = 6.0    # ±6% range
+GRID_LEVELS    = 8      # aantal levels
+RANGE_PCT      = 3.0    # ±3% range
 EUR_RESERVE    = 50.0
 LOOP_SLEEP     = 60     # seconden tussen checks
 TAKER_FEE_PCT  = 0.25
