@@ -29,7 +29,7 @@ logging.basicConfig(
 STATE_FILE  = "/opt/render/project/src/grid_state.json"
 TRADES_FILE = "/opt/render/project/src/grid_transactions.csv"
 
-GRID_COINS     = ["BTC/EUR", "ETH/EUR"]
+GRID_COINS     = ["BTC/EUR", "ETH/EUR", "WLD/EUR"]
 STAKE_PER_COIN = 50.0   # €50 per trade
 GRID_LEVELS    = 8      # aantal levels
 RANGE_PCT      = 3.0    # ±3% range
