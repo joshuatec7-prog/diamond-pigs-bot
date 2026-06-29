@@ -33,7 +33,7 @@ GMAIL_PASS  = os.getenv("GMAIL_APP_PASSWORD", "").strip()
 
 REPORT_HOURS      = [6, 18]  # 06:00 en 18:00 UTC = 08:00 en 20:00 Nederlandse tijd
 ANALYZE_INTERVAL  = 6 * 3600
-MAX_DAY_LOSS      = 20.0   # pauzeert bij meer dan €20 dagverlies
+MAX_DAY_LOSS_PCT  = 1.5    # pauzeert bij meer dan 1.5% van totaal inleg als dagverlies
 BTC_DROP_LIMIT    = 8.0    # pauzeert bij >8% BTC daling in 24u
 BTC_RECOVER_PCT   = 4.0    # hervat als BTC 4% herstelt
 
@@ -286,10 +286,14 @@ def analyze_and_act(exchange):
     paused  = state.get("paused", False)
 
     # Check of we moeten pauzeren
+    # Dagverlies limiet: 1.5% van totaal inleg
+    total_inleg = float(state.get("total_inleg", 1500))
+    max_day_loss = total_inleg * (MAX_DAY_LOSS_PCT / 100)
+
     if not paused:
-        if day_pnl <= -MAX_DAY_LOSS:
+        if day_pnl <= -max_day_loss:
             state["paused"] = True
-            state["pause_reason"] = f"dagverlies_{day_pnl:.2f}_EUR"
+            state["pause_reason"] = f"dagverlies_{day_pnl:.2f}_EUR_limiet_{max_day_loss:.2f}"
             state["pause_btc_price"] = None
             save_state(state)
             LOG.warning("BOT GEPAUZEERD | dagverlies=%.2f EUR", day_pnl)
@@ -385,7 +389,6 @@ def main():
 
         # Analyse elke 6 uur
         if time.time() - last_analyze >= ANALYZE_INTERVAL:
-            update_inleg_if_needed(exchange)
             analyze_and_act(exchange)
             last_analyze = time.time()
 
@@ -394,4 +397,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
