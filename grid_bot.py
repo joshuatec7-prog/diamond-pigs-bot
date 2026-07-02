@@ -41,7 +41,7 @@ TRADES_FILE = "/var/data/grid_transactions.csv"
 # (min_inleg, stake_per_trade, max_positions)
 SCHALING = [
     (3500, 140, 4),
-    (2500, 110, 4),
+    (2500, 125, 4),
     (1500, 90,  4),
     (800,  60,  3),
     (0,    45,  3),
