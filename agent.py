@@ -7,9 +7,12 @@ Diamond Agent v3
 - Pauzeert bij dagverlies > 1.5% van total_inleg
 - Pauzeert bij BTC daling > 8%
 - Hervat automatisch
+- Bewaart alleen de laatste 2 rapport-mails in Gmail
 """
 
 import csv
+import email as emaillib
+import imaplib
 import json
 import logging
 import os
@@ -68,6 +71,41 @@ def send_email(subject: str, body: str):
         LOG.info("Email verstuurd: %s", subject)
     except Exception as e:
         LOG.error("Email mislukt: %s", e)
+
+
+def cleanup_rapport_emails(bewaar: int = 2):
+    """
+    Verwijdert oude Diamond Bot rapport-mails via IMAP.
+    Bewaart de laatste `bewaar` stuks, gooit de rest in de prullenbak.
+    Zoekt in alle mappen (ook het Crypto-label waar de filter ze naartoe stuurt).
+    """
+    if not GMAIL_PASS:
+        return
+    try:
+        with imaplib.IMAP4_SSL("imap.gmail.com") as imap:
+            imap.login(GMAIL_USER, GMAIL_PASS)
+
+            # Zoek in alle mail (ook gearchiveerde/gelabelde mails)
+            imap.select('"[Gmail]/All Mail"')
+
+            # Zoek rapport-mails van onszelf met "Diamond" in het onderwerp
+            _, data = imap.search(None, '(FROM "joshuatec7@gmail.com" SUBJECT "Diamond")')
+            mail_ids = data[0].split()
+
+            if len(mail_ids) <= bewaar:
+                LOG.info("Cleanup: %d rapport(en) gevonden, niks te verwijderen", len(mail_ids))
+                return
+
+            # Oudste eerst — verwijder alles behalve de laatste `bewaar`
+            te_verwijderen = mail_ids[:-bewaar]
+            for mid in te_verwijderen:
+                imap.store(mid, '+FLAGS', '\\Deleted')
+
+            imap.expunge()
+            LOG.info("Rapport cleanup: %d verwijderd, %d bewaard", len(te_verwijderen), bewaar)
+
+    except Exception as e:
+        LOG.error("Cleanup mislukt: %s", e)
 
 
 def get_btc_change(exchange) -> float:
@@ -243,9 +281,9 @@ def analyze_and_act(exchange):
 
     if not paused:
         if day_pnl <= -max_loss:
-            state["paused"]      = True
+            state["paused"]       = True
             state["pause_reason"] = f"dagverlies_{day_pnl:.2f}_EUR"
-            state["pause_date"]  = datetime.now().strftime("%Y-%m-%d")
+            state["pause_date"]   = datetime.now().strftime("%Y-%m-%d")
             save_state(state)
             LOG.warning("BOT GEPAUZEERD | dagverlies=%.2f EUR (limiet=%.2f)", day_pnl, max_loss)
             send_email("⚠️ Diamond Bot GEPAUZEERD - Dagverlies",
@@ -315,12 +353,13 @@ def main():
     while True:
         now = datetime.now(timezone.utc)
 
-        # Dagrapport 08:00 en 20:00 NL = 06:00 en 18:00 UTC
+        # Dagrapport
         if now.hour in REPORT_HOURS_UTC and now.hour != last_report_hr:
             send_email(
                 f"📊 Diamond Bot Rapport {now.strftime('%d-%m-%Y %H:%M')} UTC",
                 build_report(exchange)
             )
+            cleanup_rapport_emails(bewaar=2)  # bewaar alleen de laatste 2
             last_report_hr = now.hour
 
         # Weekrapport zondag 09:00 NL = 07:00 UTC
